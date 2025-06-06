@@ -1,4 +1,3 @@
-import streamlit as st
 import pandas as pd
 import re
 import io
@@ -17,14 +16,14 @@ st.markdown(
     3. W przeciwnym razie (lub gdy PyPDF2 nie wyciągnie w ogóle linii) 
        wyciąga tekst przez pdfplumber (nowy sposób) i próbuje wykryć układy:
        - **Układ D**: proste linie zawierające tylko EAN (13 cyfr) i ilość, np.  
-         `5029040012366 Nazwa Produktu 96,00 szt.` lub `5029040012366 96,00 szt.`  
+         5029040012366 Nazwa Produktu 96,00 szt. lub 5029040012366 96,00 szt.  
        - **Układ E**: linie zaczynające się od Lp i nazwy, potem ilość, a poniżej „Kod kres.: <EAN>”.  
-         (Przykłady plików typu `Gussto wola park.pdf` czy `Zamówienie nr ZD 0175_05_25.pdf`.)  
+         (Przykłady plików typu Gussto wola park.pdf czy Zamówienie nr ZD 0175_05_25.pdf.)  
        - **Układ B**: każda pozycja w jednej linii, np.  
-         `<Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt.`  
+         <Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt.  
        - **Układ C**: czysty 13-cyfrowy EAN w osobnej linii, potem Lp w osobnej linii, potem nazwa, „szt.” i ilość.  
        - **Układ A**: „Kod kres.: <EAN>” w osobnej linii, Lp w osobnej linii, fragmenty nazwy przed i po kolumnie cen/ilości.
-    4. Wywołuje odpowiedni parser i wyświetla wynik w formie tabeli (`Lp`, `Symbol`, `Ilość`, `Barcode`).
+    4. Wywołuje odpowiedni parser i wyświetla wynik w formie tabeli (Lp, Name, Quantity, Barcode).
     5. Umożliwia pobranie danych jako plik Excel.
     """
 )
@@ -83,7 +82,7 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
       5029040012366 Nazwa Produktu 96,00 szt.
       5029040012403 96,00 szt.
     - Lp automatycznie rośnie od 1.
-    - Symbol pozostaje puste.
+    - Name pozostaje puste.
     """
     products = []
     pattern = re.compile(
@@ -95,11 +94,11 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
         m = pattern.match(ln)
         if m:
             barcode_val = m.group(1)
-            qty_val = int(m.group(2).replace(" ", ""))
+            qty_val = int(m.group(2).replace(" ", "").replace(" ", ""))
             products.append({
                 "Lp": lp_counter,
-                "Symbol": "",
-                "Ilość": qty_val,
+                "Name": "",
+                "Quantity": qty_val,
                 "Barcode": barcode_val
             })
             lp_counter += 1
@@ -119,7 +118,7 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
       Run Turkey
       ARA000613
       Kod kres.: 5029040013318
-      …
+      ...
     
     Logika:
       - Wzorzec dopasowujący Lp na początku, potem dowolny tekst (nazwa),
@@ -166,8 +165,8 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
             full_name = " ".join(name_parts).strip()
             products.append({
                 "Lp": lp_val,
-                "Symbol": full_name,
-                "Ilość": qty_val,
+                "Name": full_name,
+                "Quantity": qty_val,
                 "Barcode": barcode_val
             })
 
@@ -182,7 +181,7 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
     """
     Parser dla układu B – każda pozycja w jednej linii:
       <Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt. …
-    Wyciąga Lp, Barcode, Symbol, Ilość.
+    Wyciąga Lp, Barcode, Name, Quantity.
     Przykład:
       3 5029040012045 Canalban Kot … 12,00 szt.
     """
@@ -197,11 +196,11 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
             lp_val = int(m.group(1))
             barcode_val = m.group(2)
             name_val = m.group(3).strip()
-            qty_val = int(m.group(4).replace(" ", ""))
+            qty_val = int(m.group(4).replace(" ", "").replace(" ", ""))
             products.append({
                 "Lp": lp_val,
-                "Symbol": name_val,
-                "Ilość": qty_val,
+                "Name": name_val,
+                "Quantity": qty_val,
                 "Barcode": barcode_val
             })
     return pd.DataFrame(products)
@@ -244,8 +243,8 @@ def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
         if name_val and qty_val is not None:
             products.append({
                 "Lp": int(all_lines[lp_idx]),
-                "Symbol": name_val.strip(),
-                "Ilość": qty_val,
+                "Name": name_val.strip(),
+                "Quantity": qty_val,
                 "Barcode": barcode_val
             })
 
@@ -260,7 +259,7 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
     Przykład fragmentu:
       1
       Nazwa Produktu
-      … (kilka linii z nazwą)
+      …
       8
       szt.
       Kod kres.: 5029040013097
@@ -316,7 +315,7 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
 
         for k in range(qty_idx + 1, next_lp):
             ln2 = all_lines[k]
-            if ln2.lower().startswith("kod kres"):
+            if ln2.startswith("Kod kres"):
                 break
             if (
                 re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", ln2)
@@ -331,8 +330,8 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
         full_name = " ".join(name_parts).strip()
         products.append({
             "Lp": int(all_lines[lp_idx]),
-            "Symbol": full_name,
-            "Ilość": qty_val,
+            "Name": full_name,
+            "Quantity": qty_val,
             "Barcode": barcode_val
         })
 
@@ -417,9 +416,9 @@ if df.empty:
     else:
         df = parse_layout_a(lines_new)
 
-# 3.6) Odfiltruj wiersze, które nie mają wartości „Ilość” (jeśli kolumna istnieje)
-if "Ilość" in df.columns:
-    df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
+# 3.6) Odfiltruj wiersze, które nie mają wartości Quantity (jeśli kolumna istnieje)
+if "Quantity" in df.columns:
+    df = df.dropna(subset=["Quantity"]).reset_index(drop=True)
 
 # 3.7) Sprawdź, czy cokolwiek zostało wyciągnięte
 if df.empty:
