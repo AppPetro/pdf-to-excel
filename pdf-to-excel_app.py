@@ -24,7 +24,7 @@ st.markdown(
          `<Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt.`  
        - **Układ C**: czysty 13-cyfrowy EAN w osobnej linii, potem Lp w osobnej linii, potem nazwa, „szt.” i ilość.  
        - **Układ A**: „Kod kres.: <EAN>” w osobnej linii, Lp w osobnej linii, fragmenty nazwy przed i po kolumnie cen/ilości.
-    4. Wywołuje odpowiedni parser i wyświetla wynik w formie tabeli (`Lp`, `Symbol`, `Ilość`, `Barcode`).
+    4. Wywołuje odpowiedni parser i wyświetla wynik w formie tabeli (`Lp`, `Symbol`, `Ilość`).
     5. Umożliwia pobranie danych jako plik Excel.
     """
 )
@@ -83,7 +83,7 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
       5029040012366 Nazwa Produktu 96,00 szt.
       5029040012403 96,00 szt.
     - Lp automatycznie rośnie od 1.
-    - Name (Symbol) pozostaje puste.
+    - Symbol to kod EAN.
     """
     products = []
     pattern = re.compile(
@@ -95,12 +95,11 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
         m = pattern.match(ln)
         if m:
             barcode_val = m.group(1)
-            qty_val = int(m.group(2).replace(" ", "").replace(" ", ""))
+            qty_val = int(m.group(2).replace(" ", ""))
             products.append({
                 "Lp": lp_counter,
-                "Symbol": "",
-                "Ilość": qty_val,
-                "Barcode": barcode_val
+                "Symbol": barcode_val,
+                "Ilość": qty_val
             })
             lp_counter += 1
     return pd.DataFrame(products)
@@ -110,6 +109,9 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
     """
     Parser dla układu E – linia z Lp i tekstem nazwy oraz ilością w tej samej linii,
     a poniżej (ewentualnie po liniach typu "ARA...") znajduje się linia "Kod kres.: <EAN>".
+    - Lp to numer,
+    - Symbol to kod EAN znaleziony w linii "Kod kres.:",
+    - Ilość to liczba przy "szt.".
     """
     products = []
     i = 0
@@ -120,39 +122,25 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
         m = pattern_item.match(ln)
         if m:
             lp_val = int(m.group(1))
-            initial_name = m.group(2).strip()
             qty_val = int(m.group(3))
-            name_parts = [initial_name]
             barcode_val = None
 
             j = i + 1
             while j < len(all_lines):
                 next_ln = all_lines[j]
-
                 if next_ln.lower().startswith("kod kres"):
                     parts = next_ln.split(":", 1)
                     if len(parts) == 2:
                         barcode_val = parts[1].strip()
                     j += 1
                     break
-
-                if re.fullmatch(r"[A-Za-z0-9]+", next_ln):
-                    # linia katalogu (ARA...), pomijamy
-                    j += 1
-                    continue
-
-                # w przeciwnym razie traktujemy jako fragment nazwy
-                name_parts.append(next_ln.strip())
                 j += 1
 
-            full_name = " ".join(name_parts).strip()
             products.append({
                 "Lp": lp_val,
-                "Symbol": full_name,
-                "Ilość": qty_val,
-                "Barcode": barcode_val
+                "Symbol": barcode_val or "",
+                "Ilość": qty_val
             })
-
             i = j
         else:
             i += 1
@@ -164,9 +152,9 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
     """
     Parser dla układu B – każda pozycja w jednej linii:
       <Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt. …
-    Wyciąga Lp, Barcode, Symbol, Ilość.
-    Przykład:
-      3 5029040012045 Canalban Kot … 12,00 szt.
+    - Lp to numer,
+    - Symbol to kod EAN (druga grupa),
+    - Ilość to liczba przed ",xx szt.".
     """
     products = []
     pattern = re.compile(
@@ -178,29 +166,21 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
         if m:
             lp_val = int(m.group(1))
             barcode_val = m.group(2)
-            name_val = m.group(3).strip()
-            qty_val = int(m.group(4).replace(" ", "").replace(" ", ""))
+            qty_val = int(m.group(4).replace(" ", ""))
             products.append({
                 "Lp": lp_val,
-                "Symbol": name_val,
-                "Ilość": qty_val,
-                "Barcode": barcode_val
+                "Symbol": barcode_val,
+                "Ilość": qty_val
             })
     return pd.DataFrame(products)
 
 
 def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
     """
-    Parser dla układu C – czysty 13-cyfrowy EAN w osobnej linii, potem Lp, potem nazwa,
-    potem "szt." i ilość w kolejnych wierszach.
-    
-    Przykład:
-      5029040012366
-      3
-      Nazwa Produktu
-      szt.
-      12
-      (opcjonalnie: "Kod kres.: <...>")
+    Parser dla układu C – czysty 13-cyfrowy EAN w osobnej linii, potem Lp,
+    potem nazwa, potem "szt." i ilość w kolejnych wierszach.
+    - Symbol to 13-cyfrowy EAN z linię powyżej Lp.
+    - Ilość to liczba po "szt.".
     """
     idx_lp = []
     for i in range(len(all_lines) - 1):
@@ -213,9 +193,7 @@ def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
     products = []
     for lp_idx in idx_lp:
         eans_before = [e for e in idx_ean if e < lp_idx]
-        barcode_val = all_lines[max(eans_before)] if eans_before else None
-
-        name_val = all_lines[lp_idx + 1] if lp_idx + 1 < len(all_lines) else None
+        barcode_val = all_lines[max(eans_before)] if eans_before else ""
 
         qty_val = None
         for j in range(lp_idx + 1, len(all_lines) - 2):
@@ -223,12 +201,11 @@ def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
                 qty_val = int(all_lines[j + 2])
                 break
 
-        if name_val and qty_val is not None:
+        if qty_val is not None:
             products.append({
                 "Lp": int(all_lines[lp_idx]),
-                "Symbol": name_val.strip(),
-                "Ilość": qty_val,
-                "Barcode": barcode_val
+                "Symbol": barcode_val,
+                "Ilość": qty_val
             })
 
     return pd.DataFrame(products)
@@ -238,15 +215,8 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
     """
     Parser dla układu A – "Kod kres.: <EAN>" w osobnej linii, Lp w osobnej linii,
     fragmenty nazwy przed i po kolumnie cen/ilości.
-
-    Przykład fragmentu:
-      1
-      Nazwa Produktu
-      … (kilka linii z nazwą)
-      8
-      szt.
-      Kod kres.: 5029040013097
-      (kolejna pozycja)
+    - Symbol to kod EAN z linii "Kod kres.:",
+    - Ilość to liczba po "szt.".
     """
     idx_lp = []
     for i in range(len(all_lines) - 1):
@@ -267,56 +237,25 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
         next_lp = idx_lp[idx + 1] if idx + 1 < len(idx_lp) else len(all_lines)
 
         valid_eans = [e for e in idx_ean if prev_lp < e < next_lp]
-        barcode_val = None
+        barcode_val = ""
         if valid_eans:
             parts = all_lines[max(valid_eans)].split(":", 1)
             if len(parts) == 2:
                 barcode_val = parts[1].strip()
 
-        name_parts: list[str] = []
         qty_val = None
-        qty_idx = None
-
         for j in range(lp_idx + 1, next_lp):
             ln = all_lines[j]
             if re.fullmatch(r"\d+", ln) and (j + 1 < next_lp and all_lines[j + 1].lower() == "szt."):
-                qty_idx = j
                 qty_val = int(ln)
                 break
-            if (
-                re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", ln)
-                and not re.fullmatch(r"\d{1,3}(?: \d{3})*,\d{2}", ln)
-                and not ln.startswith("VAT")
-                and ln != "/"
-                and not ln.startswith("ARA")
-                and not ln.startswith("KAT")
-            ):
-                name_parts.append(ln)
 
-        if qty_idx is None:
-            continue
-
-        for k in range(qty_idx + 1, next_lp):
-            ln2 = all_lines[k]
-            if ln2.startswith("Kod kres"):
-                break
-            if (
-                re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", ln2)
-                and not re.fullmatch(r"\d{1,3}(?: \d{3})*,\d{2}", ln2)
-                and not ln2.startswith("VAT")
-                and ln2 != "/"
-                and not ln2.startswith("ARA")
-                and not ln2.startswith("KAT")
-            ):
-                name_parts.append(ln2)
-
-        full_name = " ".join(name_parts).strip()
-        products.append({
-            "Lp": int(all_lines[lp_idx]),
-            "Symbol": full_name,
-            "Ilość": qty_val,
-            "Barcode": barcode_val
-        })
+        if qty_val is not None:
+            products.append({
+                "Lp": int(all_lines[lp_idx]),
+                "Symbol": barcode_val,
+                "Ilość": qty_val
+            })
 
     return pd.DataFrame(products)
 
