@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import io
 import PyPDF2
+import pdfplumber
 
 st.set_page_config(page_title="PDF → Excel", layout="wide")
 st.title("PDF → Excel")
@@ -10,16 +11,19 @@ st.title("PDF → Excel")
 st.markdown(
     """
     Wgraj plik PDF ze zamówieniem. Aplikacja:
-    1. Wyciąga tekst przez PyPDF2.
-    2. Na podstawie wykrytego układu wybiera odpowiedni parser:
+    1. Próbuje wyciągnąć tekst przez PyPDF2 (stare „trudniejsze” PDF-y).
+    2. Jeśli w wyciągniętym przez PyPDF2 tekście nie są wykryte układy D lub E, 
+       używa starych parserów (układ B, C lub A).
+    3. W przeciwnym razie (lub gdy PyPDF2 nie wyciągnie w ogóle linii), 
+       wyciąga ponownie tekst przez pdfplumber i stara się wykryć układy:
        - **Układ D**: linie zawierające tylko EAN (13 cyfr) i ilość (`<ilość>,<xx> szt.`).  
-       - **Układ E**: linie zaczynające się od Lp i nazwy, potem ilość, a poniżej „Kod kres.: <EAN>”.  
-         (Przykłady: pliki typu `Gussto wola park.pdf`, `Zamówienie nr ZD 0175_05_25.pdf`.)  
+       - **Układ E**: linie zaczynające się od Lp i nazwy, potem ilość, a poniżej linia „Kod kres.: <EAN>”.  
        - **Układ B**: cała pozycja w jednej linii: `<Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt.`  
-       - **Układ C**: czysty 13-cyfrowy EAN w osobnej linii, potem Lp, potem nazwa, „szt.” i ilość.  
+       - **Układ C**: czysty 13-cyfrowy EAN w osobnej linii, następnie Lp, następnie nazwa, „szt.” i ilość.  
        - **Układ A**: „Kod kres.: <EAN>” w osobnej linii, Lp w osobnej linii, fragmenty nazwy przed i po liczbie.
-    3. Wywołuje odpowiedni parser i wyświetla wynik w formie tabeli (`Lp`, `Symbol`, `Quantity`, `Kod EAN`).
-    4. Umożliwia pobranie danych jako plik Excel.
+    4. Wywołuje odpowiedni parser i wyświetla tabelę z kolumnami:
+       **`Lp`**, **`Symbol`**, **`Quantity`**, **`Kod EAN`**.
+    5. Pozwala pobrać wynik jako plik Excel.
     """
 )
 
@@ -46,8 +50,27 @@ def extract_text_with_pypdf2(pdf_bytes: bytes) -> list[str]:
     return lines
 
 
+def extract_text_with_pdfplumber(pdf_bytes: bytes) -> list[str]:
+    """
+    Wyciąga wszystkie niepuste linie tekstu przy pomocy pdfplumber.
+    Jeśli nic nie znajdzie lub wystąpi błąd, zwraca pustą listę.
+    """
+    lines: list[str] = []
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                for ln in text.split("\n"):
+                    stripped = ln.strip()
+                    if stripped:
+                        lines.append(stripped)
+    except Exception:
+        return []
+    return lines
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) PARSERY UKŁADÓW D, E, B, C, A – wszystkie pracują na linii z PyPDF2
+# 2) PARSERY UKŁADÓW
 
 def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
     """
@@ -55,6 +78,7 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
     Przykład:
       5029040012366 Nazwa Produktu 96,00 szt.
       5029040012403 96,00 szt.
+
     - Lp automatycznie rośnie od 1.
     - Symbol (kolumna) pozostaje pusty, bo nazwa nie zawsze jest w tej samej linii.
     """
@@ -81,8 +105,24 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
 
 def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
     """
-    Parser dla układu E – linie zaczynające się od Lp i nazwy oraz ilości w tej samej linii,
+    Parser dla układu E – linia zaczyna się od Lp i nazwy oraz ilości w tej samej linii,
     a poniżej (ewentualnie po liniach typu "ARA...") znajduje się linia "Kod kres.: <EAN>".
+
+    Przykład sekwencji:
+      1 CANAGAN Kot 0,375kg 8 szt. …
+      ARA000585
+      Kod kres.: 5029040013097
+      2 CANAGAN Kot SCOTTISH 8 szt. …
+      Run Turkey
+      ARA000613
+      Kod kres.: 5029040013318
+      …
+
+    - Wzorzec dopasowuje Lp (liczba) na początku, potem dowolny tekst (nazwa), a za nim „<ilość> szt.”.
+    - Następnie zbiera wiersze aż do napotkania "Kod kres.: <EAN>".
+      • Jeśli linia jest czysto alfanumeryczna (np. "ARA000613"), pomija.
+      • W przeciwnym razie traktuje jako kontynuację nazwy.
+    - Gdy napotka "Kod kres.: <EAN>", wyciąga kod i kończy budowę pojedynczej pozycji.
     """
     products = []
     i = 0
@@ -135,8 +175,11 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
 
 def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
     """
-    Parser dla układu B – cała pozycja w jednej linii:
+    Parser dla układu B – każda pozycja w jednej linii:
       <Lp> <EAN(13)> <pełna nazwa> <ilość>,<xx> szt. …
+    Wyciąga Lp, Kod EAN, Symbol, Quantity.
+    Przykład:
+      3 5029040012045 Canalban Kot … 12,00 szt.
     """
     products = []
     pattern = re.compile(
@@ -161,8 +204,16 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
 
 def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
     """
-    Parser dla układu C – czysty 13-cyfrowy EAN w osobnej linii, potem Lp, potem nazwa,
-    potem "szt." i ilość w kolejnych wierszach.
+    Parser dla układu C – czysty 13-cyfrowy EAN w osobnej linii, potem Lp, 
+    potem nazwa, potem „szt.” i ilość w kolejnych wierszach.
+
+    Przykład:
+      5029040012366
+      3
+      Nazwa Produktu
+      szt.
+      12
+      (opcjonalnie: "Kod kres.: <EAN>")
     """
     idx_lp = []
     for i in range(len(all_lines) - 1):
@@ -200,6 +251,15 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
     """
     Parser dla układu A – "Kod kres.: <EAN>" w osobnej linii, Lp w osobnej linii,
     fragmenty nazwy przed i po kolumnie cen/ilości.
+
+    Przykład fragmentu:
+      1
+      Nazwa Produktu
+      … (kilka linii z nazwą)
+      8
+      szt.
+      Kod kres.: 5029040013097
+      (następna pozycja)
     """
     idx_lp = []
     for i in range(len(all_lines) - 1):
@@ -275,7 +335,7 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) GŁÓWNA LOGIKA: WCZYTANIE PLIKÓW I WYBÓR PARSERA
+# 3) GŁÓWNA LOGIKA: WCZYTANIE PLIKÓW I WYBOR PARSERA
 
 # 3.1) Wgraj PDF
 uploaded_file = st.file_uploader("Wybierz plik PDF ze zamówieniem", type=["pdf"])
@@ -285,47 +345,76 @@ if uploaded_file is None:
 
 pdf_bytes = uploaded_file.read()
 
-# 3.2) Wyciągnięcie tekstu przez PyPDF2
-all_lines = extract_text_with_pypdf2(pdf_bytes)
+# 3.2) Wyciągnięcie tekstu przez PyPDF2 (stary sposób)
+lines_py = extract_text_with_pypdf2(pdf_bytes)
 
-# 3.3) Sprawdź, czy w tekście są układy D/E, aby wiedzieć, czy natychmiast parsować D/E
+# 3.3) Rozpoznaj układy D i E w liniach z PyPDF2
 pattern_d = re.compile(r"^\d{13}(?:\s+.*?)*\s+\d{1,3},\d{2}\s+szt", flags=re.IGNORECASE)
-is_layout_d = any(pattern_d.match(ln) for ln in all_lines)
+is_layout_d_py = any(pattern_d.match(ln) for ln in lines_py)
 
 pattern_e = re.compile(r"^\d+\s+.+?\s+\d{1,3}\s+szt\.", flags=re.IGNORECASE)
-has_kod_kres = any(ln.lower().startswith("kod kres") for ln in all_lines)
-is_layout_e = any(pattern_e.match(ln) for ln in all_lines) and has_kod_kres
+has_kod_kres_py = any(ln.lower().startswith("kod kres") for ln in lines_py)
+is_layout_e_py = any(pattern_e.match(ln) for ln in lines_py) and has_kod_kres_py
 
-# 3.4) Jeśli nie znaleziono linii albo wykryto D/E → i tak użyjemy PyPDF2 do wszystkich układów
-#       (po prostu nie ma dwóch etapów – używamy tylko PyPDF2),
-#       ale jeśli wykryto D lub E, wiemy, że chcemy parse_layout_d lub parse_layout_e.
+# 3.4) Jeśli linie PyPDF2 istnieją i NIE są układem D ani E → użyj „starych” parserów (B, C lub A)
 df = pd.DataFrame()
-if all_lines:
-    if is_layout_d:
-        df = parse_layout_d(all_lines)
-    elif is_layout_e:
-        df = parse_layout_e(all_lines)
+if lines_py and not is_layout_d_py and not is_layout_e_py:
+    # Sprawdź układ B (Lp + EAN + nazwa + ilość w jednej linii)
+    pattern_b = re.compile(r"^\d+\s+\d{13}\s+.+\s+\d{1,3},\d{2}\s+szt", flags=re.IGNORECASE)
+    is_layout_b_py = any(pattern_b.match(ln) for ln in lines_py)
+
+    # Sprawdź układ C (czysty EAN w jednej linii, ale to nie układ B)
+    has_pure_ean_py = any(re.fullmatch(r"\d{13}", ln) for ln in lines_py)
+    is_layout_c_py = has_pure_ean_py and not is_layout_b_py
+
+    if is_layout_b_py:
+        df = parse_layout_b(lines_py)
+    elif is_layout_c_py:
+        df = parse_layout_c(lines_py)
     else:
-        # Spróbuj układ B
-        pattern_b = re.compile(r"^\d+\s+\d{13}\s+.+\s+\d{1,3},\d{2}\s+szt", flags=re.IGNORECASE)
-        is_layout_b = any(pattern_b.match(ln) for ln in all_lines)
+        df = parse_layout_a(lines_py)
 
-        # Spróbuj układ C
-        has_pure_ean = any(re.fullmatch(r"\d{13}", ln) for ln in all_lines)
-        is_layout_c = has_pure_ean and not is_layout_b
+# 3.5) Jeśli nic nie wyciągnięto starym sposobem LUB wykryto D/E w PyPDF2 → użyj pdfplumber
+if df.empty:
+    lines_new = extract_text_with_pdfplumber(pdf_bytes)
 
-        if is_layout_b:
-            df = parse_layout_b(all_lines)
-        elif is_layout_c:
-            df = parse_layout_c(all_lines)
-        else:
-            df = parse_layout_a(all_lines)
+    if not lines_new:
+        st.error(
+            "Nie udało się wyciągnąć tekstu z tego PDF-a. "
+            "Być może wymaga OCR – wykonaj OCR (np. Tesseract) i wgraj ponownie."
+        )
+        st.stop()
 
-# 3.5) Usuń wiersze bez wartości „Quantity” (jeśli kolumna istnieje)
+    # Ponownie rozpoznaj układy D i E, ale tym razem na liniach z pdfplumber
+    is_layout_d_new = any(pattern_d.match(ln) for ln in lines_new)
+    has_kod_kres_new = any(ln.lower().startswith("kod kres") for ln in lines_new)
+    is_layout_e_new = any(pattern_e.match(ln) for ln in lines_new) and has_kod_kres_new
+
+    # Rozpoznaj układ B i C w liniach z pdfplumber
+    is_layout_b_new = any(
+        re.compile(r"^\d+\s+\d{13}\s+.+\s+\d{1,3},\d{2}\s+szt", flags=re.IGNORECASE).match(ln)
+        for ln in lines_new
+    )
+    has_pure_ean_new = any(re.fullmatch(r"\d{13}", ln) for ln in lines_new)
+    is_layout_c_new = has_pure_ean_new and not is_layout_b_new
+
+    # Wybór parsera w nowym trybie
+    if is_layout_d_new:
+        df = parse_layout_d(lines_new)
+    elif is_layout_e_new:
+        df = parse_layout_e(lines_new)
+    elif is_layout_b_new:
+        df = parse_layout_b(lines_new)
+    elif is_layout_c_new:
+        df = parse_layout_c(lines_new)
+    else:
+        df = parse_layout_a(lines_new)
+
+# 3.6) Usuń wiersze bez wartości „Quantity” (jeśli kolumna istnieje)
 if "Quantity" in df.columns:
     df = df.dropna(subset=["Quantity"]).reset_index(drop=True)
 
-# 3.6) Jeśli nic nie znaleziono, wyświetl błąd
+# 3.7) Sprawdź, czy udało się cokolwiek wyciągnąć
 if df.empty:
     st.error(
         "Po parsowaniu nie znaleziono pozycji zamówienia. "
@@ -334,7 +423,7 @@ if df.empty:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) WYŚWIETLENIE WYNIKÓW I EKSPORT DO EXCEL
+# 4) WYŚWIETLENIE WYNIKÓW I POBRANIE EXCEL
 
 st.subheader("Wyekstrahowane pozycje zamówienia")
 st.dataframe(df, use_container_width=True)
@@ -352,5 +441,5 @@ st.download_button(
     label="Pobierz wynik jako Excel",
     data=excel_data,
     file_name="parsed_zamowienie.xlsx",
-    mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
