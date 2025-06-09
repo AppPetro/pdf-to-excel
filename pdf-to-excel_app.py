@@ -180,9 +180,3 @@ st.download_button(
     file_name="parsed_zamowienie.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
-    label="Pobierz wynik jako Excel",
-    data=to_excel(df),
-    file_name="parsed_zamowienie.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
