@@ -83,7 +83,6 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
                 if nxt.lower().startswith("kod kres"):
                     parts = nxt.split(":", 1)
                     if len(parts) == 2:
-                        # jeżeli po prefiksie pojawi się numer EAN
                         found = re.search(r"(\d{13})", parts[1])
                         if found:
                             ean = found.group(1)
@@ -110,48 +109,39 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
 
 def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
     """
-    Układ C – EAN w osobnej linii (czysty lub jako 'Kod kres.: <EAN>'),
-    potem Lp, potem nazwa, potem “szt.” i ilość.
+    Układ C – każdy 13-cyfrowy ciąg w linii traktujemy jako EAN,
+    potem najbliższy wcześniej napotkany EAN łączymy z Lp i ilością.
     """
-    # 1) Znajdź indeksy wierszy, które zawierają Lp
+    # 1) Wyłap wszystkie indeksy linii, które wyglądają jak numer Lp
     idx_lp = []
     for i in range(len(all_lines) - 1):
-        if re.fullmatch(r"\d+", all_lines[i]):
-            nxt = all_lines[i + 1]
-            if re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", nxt):
-                idx_lp.append(i)
+        if re.fullmatch(r"\d+", all_lines[i]) and re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", all_lines[i+1]):
+            idx_lp.append(i)
 
-    # 2) Znajdź indeksy linii z EAN-em (czyste 13 cyfr lub prefiks "Kod kres.:")
+    # 2) Wyłap **wszystkie** linie zawierające 13-cyfrowy ciąg
     idx_ean: list[int] = []
-    ean_map: dict[int,str] = {}
+    ean_map: dict[int, str] = {}
     for i, ln in enumerate(all_lines):
-        # czysta linia z 13 cyfr
-        if re.fullmatch(r"\d{13}", ln):
+        m = re.search(r"\b(\d{13})\b", ln)
+        if m:
             idx_ean.append(i)
-            ean_map[i] = ln
-        # linia z prefiksem "Kod kres.:"
-        elif ln.lower().startswith("kod kres"):
-            parts = ln.split(":", 1)
-            if len(parts) == 2:
-                found = re.search(r"(\d{13})", parts[1])
-                if found:
-                    idx_ean.append(i)
-                    ean_map[i] = found.group(1)
+            ean_map[i] = m.group(1)
 
     products = []
-    # 3) Dla każdego Lp weź najbliższy wcześniejszy EAN
+    # 3) Dla każdego numeru Lp – weź ostatni (najbliższy) EAN przed nim
     for lp_idx in idx_lp:
-        prior = [e for e in idx_ean if e < lp_idx]
-        if not prior:
+        poprzednie = [e for e in idx_ean if e < lp_idx]
+        if not poprzednie:
             continue
-        # wybierz ostatni EAN przed tym Lp
-        ean = ean_map[max(prior)]
-        # 4) znajdź ilość: szukaj "szt." + następujący po nim numer
+        ean = ean_map[max(poprzednie)]
+
+        # 4) Szukamy ilości: po linii z "szt." powinna być czysta liczba
         qty = None
         for j in range(lp_idx + 1, len(all_lines) - 1):
-            if all_lines[j].lower() == "szt." and re.fullmatch(r"\d+", all_lines[j + 1]):
-                qty = int(all_lines[j + 1])
+            if all_lines[j].lower().strip() == "szt." and re.fullmatch(r"\d+", all_lines[j+1].strip()):
+                qty = int(all_lines[j+1])
                 break
+
         if qty is not None:
             lp = int(all_lines[lp_idx])
             products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
