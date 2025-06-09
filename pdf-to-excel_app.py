@@ -11,21 +11,17 @@ st.title("PDF → Excel")
 st.markdown(
     """
     Wgraj plik PDF ze zamówieniem. Aplikacja:
-    1. Próbuje wyciągnąć tekst przez PyPDF2, a gdy to się nie uda – przez pdfplumber.
-    2. Próbuje znaleźć pełne linie z EAN-em i ilością (layout D):
-       linia zaczyna się od 13 cyfr i zawiera ",<xx>,xx szt.".
-    3. Jeśli znajdzie takie linie, zwraca je jako pozycje z automatycznie numerowanym Lp.
-    4. W przeciwnym razie przechodzi do trybu uniwersalnego:
-       - Aktualizuje bieżący EAN (każdy 13-cyfrowy ciąg).
-       - Wykrywa numer pozycji (Lp) ze czystej linii z cyframi.
-       - Wykrywa ilość przy słowie "szt." w tej samej linii.
-       - Tworzy rekordy tylko, gdy ma wszystkie trzy elementy: Lp, EAN, ilość.
-    5. Wynik wyświetla się w tabeli i można go pobrać jako Excel.
+    1. Wyciąga tekst przez PyPDF2 lub pdfplumber.
+    2. Parser:
+       - Skupia się na wykrywaniu kolejnych EAN-ów (13 cyfr) i ilości (\"<liczba> szt.\").
+       - Gdy znajdzie EAN i później ilość, tworzy rekord {Lp, Symbol: EAN, Ilość}.
+    3. Wyświetla tabelę i umożliwia pobranie pliku Excel.
     """
 )
 
-
-def extract_text(pdf_bytes):
+def extract_text(pdf_bytes: bytes) -> list[str]:
+    """Wyciąga linie tekstu z PDF -> listę niepustych stringów."""
+    # PyPDF2
     try:
         reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         lines = []
@@ -39,7 +35,7 @@ def extract_text(pdf_bytes):
             return lines
     except Exception:
         pass
-    # fallback
+    # pdfplumber fallback
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             lines = []
@@ -54,48 +50,24 @@ def extract_text(pdf_bytes):
         return []
 
 
-def parse_records(lines):
-    # Layout D: pełne linie zaczynające się od EAN i zawierające ilość
-    pattern_full = re.compile(r"^(\d{13}).*?(\d{1,4}),\d{2}\s*szt", flags=re.IGNORECASE)
+def parse_records(lines: list[str]) -> pd.DataFrame:
+    """Parsuje EAN i odpowiadające im ilości w kolejności występowania."""
     records = []
     lp_counter = 1
+    last_ean = None
+    # skanuj linia po linii
     for ln in lines:
-        m = pattern_full.match(ln)
-        if m:
-            records.append({
-                "Lp": lp_counter,
-                "Symbol": m.group(1),
-                "Ilość": int(m.group(2))
-            })
-            lp_counter += 1
-    if records:
-        return pd.DataFrame(records)
-
-    # Tryb uniwersalny
-    records = []
-    current_ean = None
-    current_lp = None
-    for ln in lines:
-        # Aktualizuj EAN
+        # wykryj EAN (13 cyfr)
         m_ean = re.search(r"\b(\d{13})\b", ln)
         if m_ean:
-            current_ean = m_ean.group(1)
-            continue
-        # Aktualizuj numer pozycji (Lp)
-        m_lp = re.fullmatch(r"(\d{1,3})", ln)
-        if m_lp:
-            current_lp = int(m_lp.group(1))
-            continue
-        # Wykryj ilość w tej linii
-        m_qty = re.search(r"(\d{1,4})\s*szt\.?", ln, flags=re.IGNORECASE)
-        if m_qty and current_lp is not None and current_ean:
+            last_ean = m_ean.group(1)
+        # wykryj ilość przed 'szt'
+        m_qty = re.search(r"(\d{1,4})\s*szt", ln, flags=re.IGNORECASE)
+        if m_qty and last_ean:
             qty = int(m_qty.group(1))
-            records.append({
-                "Lp": current_lp,
-                "Symbol": current_ean,
-                "Ilość": qty
-            })
-            current_lp = None  # reset po użyciu
+            records.append({"Lp": lp_counter, "Symbol": last_ean, "Ilość": qty})
+            lp_counter += 1
+            last_ean = None  # reset po użyciu
     return pd.DataFrame(records)
 
 
@@ -120,7 +92,7 @@ st.subheader("Wyekstrahowane pozycje zamówienia")
 st.dataframe(df, use_container_width=True)
 
 # Przygotuj Excel
-def to_excel(df_in):
+def to_excel(df_in: pd.DataFrame) -> bytes:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df_in.to_excel(writer, index=False, sheet_name="Zamówienie")
