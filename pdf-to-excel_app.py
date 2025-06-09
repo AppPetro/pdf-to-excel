@@ -31,10 +31,6 @@ st.markdown(
 
 
 def extract_text_with_pypdf2(pdf_bytes: bytes) -> list[str]:
-    """
-    Wyciąga wszystkie niepuste linie tekstu przez PyPDF2.
-    Jeśli nic nie znajdzie lub wystąpi błąd, zwraca pustą listę.
-    """
     try:
         reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
     except Exception:
@@ -50,10 +46,6 @@ def extract_text_with_pypdf2(pdf_bytes: bytes) -> list[str]:
 
 
 def extract_text_with_pdfplumber(pdf_bytes: bytes) -> list[str]:
-    """
-    Wyciąga wszystkie niepuste linie tekstu przy pomocy pdfplumber.
-    Jeśli nic nie znajdzie lub wystąpi błąd, zwraca pustą listę.
-    """
     lines: list[str] = []
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -69,9 +61,6 @@ def extract_text_with_pdfplumber(pdf_bytes: bytes) -> list[str]:
 
 
 def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
-    """
-    Układ D – linie z EAN i ilością. Symbol = EAN.
-    """
     products = []
     pattern = re.compile(r"^(\d{13})(?:\s+.*?)*\s+(\d{1,3}),\d{2}\s+szt", flags=re.IGNORECASE)
     lp_counter = 1
@@ -87,39 +76,52 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
 
 def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
     """
-    Układ E – linie z Lp i ilością, poniżej "Kod kres.: <EAN>". Symbol = EAN.
+    Układ E – niezależnie od tego, czy "Lp + ilość" i "Kod kres.: EAN" 
+    są na tej samej, czy na różnych stronach, przypisujemy każdy EAN 
+    do pierwszej następnej pozycji.
     """
-    products = []
+    # 1) Wyciągamy wszystkie pozycje (Lp, Ilość) z numerem linii
     pattern_item = re.compile(r"^(\d+)\s+.+?\s+(\d{1,3})\s+szt\.", flags=re.IGNORECASE)
-    i = 0
-    while i < len(all_lines):
-        ln = all_lines[i]
+    items = []
+    for idx, ln in enumerate(all_lines):
         m = pattern_item.match(ln)
         if m:
-            lp = int(m.group(1))
-            qty = int(m.group(2))
-            ean = ""
-            j = i + 1
-            while j < len(all_lines):
-                nxt = all_lines[j]
-                if nxt.lower().startswith("kod kres"):
-                    parts = nxt.split(":", 1)
-                    if len(parts) == 2:
-                        ean = parts[1].strip()
-                    j += 1
-                    break
-                j += 1
-            products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
-            i = j
+            items.append({
+                "index": idx,
+                "Lp": int(m.group(1)),
+                "Ilość": int(m.group(2))
+            })
+
+    # 2) Wyciągamy wszystkie EANy z numerem linii
+    ean_pattern = re.compile(r"^kod kres\.\s*:\s*(\d{13})", flags=re.IGNORECASE)
+    eans = []
+    for idx, ln in enumerate(all_lines):
+        m = ean_pattern.match(ln)
+        if m:
+            eans.append({
+                "index": idx,
+                "ean": m.group(1)
+            })
+
+    # 3) Mapujemy: dla każdej pozycji znajdujemy EAN z najmniejszym index > item.index
+    products = []
+    for item in items:
+        candidates = [e for e in eans if e["index"] > item["index"]]
+        if candidates:
+            chosen = min(candidates, key=lambda e: e["index"])
+            symbol = chosen["ean"]
         else:
-            i += 1
+            symbol = ""
+        products.append({
+            "Lp": item["Lp"],
+            "Symbol": symbol,
+            "Ilość": item["Ilość"]
+        })
+
     return pd.DataFrame(products)
 
 
 def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
-    """
-    Układ B – jedna linia: Lp, EAN, nazwa, ilość. Symbol = EAN.
-    """
     products = []
     pattern = re.compile(r"^(\d+)\s+(\d{13})\s+.+?\s+(\d{1,3}),\d{2}\s+szt", flags=re.IGNORECASE)
     for ln in all_lines:
@@ -133,9 +135,6 @@ def parse_layout_b(all_lines: list[str]) -> pd.DataFrame:
 
 
 def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
-    """
-    Układ C – linia z EAN, potem Lp, nazwa, "szt.", ilość. Symbol = EAN.
-    """
     idx_lp = []
     for i in range(len(all_lines) - 1):
         if re.fullmatch(r"\d+", all_lines[i]):
@@ -159,9 +158,6 @@ def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
 
 
 def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
-    """
-    Układ A – "Kod kres.: <EAN>" w osobnej linii, Lp w osobnej linii, fragmenty nazwy, "szt.", ilość. Symbol = EAN.
-    """
     idx_lp = []
     for i in range(len(all_lines) - 1):
         if re.fullmatch(r"\d+", all_lines[i]):
