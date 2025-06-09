@@ -148,31 +148,22 @@ lines = extract_py2(pdf_bytes)
 if not lines:
     lines = extract_plumber(pdf_bytes)
 
-# wykryj layout
+# Wypróbuj kolejno wszystkie parsery w kolejności D, E, B, C, A
+parsers = [parse_d, parse_e, parse_b, parse_c, parse_a]
 df = pd.DataFrame()
-if any(re.match(r"^\d{13}.*\d{1,3},\d{2}\s*szt", ln) for ln in lines):
-    df = parse_d(lines)
-elif any(re.match(r"^\d+.*\d{1,3}\s+szt", ln, flags=re.IGNORECASE) for ln in lines):
-    df = parse_e(lines)
-elif any(re.match(r"^\d+\s+\d{13}", ln) for ln in lines):
-    df = parse_b(lines)
-elif any(re.fullmatch(r"\d{13}", ln) for ln in lines):
-    df = parse_c(lines)
-else:
-    df = parse_a(lines)
+for parser in parsers:
+    tmp = parser(lines)
+    if "Ilość" in tmp.columns and not tmp.empty:
+        df = tmp
+        break
 
-# finalizacja
-# Upewnij się, że mamy kolumnę "Ilość"
-if "Ilość" not in df.columns:
-    st.error("Parser nie zwrócił kolumny 'Ilość'. Sprawdź format PDF i konfigurację parsera.")
-    st.stop()
-# Usuń wiersze bez ilości i zresetuj indeks
-if not df.empty:
-    df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
+# Jeśli dalej pusto, komunikat błędu
+df = df.reset_index(drop=True)
 if df.empty:
     st.error("Po parsowaniu nie znaleziono pozycji zamówienia.")
     st.stop()
 
+# Wyświetl i eksportuj
 st.subheader("Wyekstrahowane pozycje zamówienia")
 st.dataframe(df, use_container_width=True)
 
@@ -189,14 +180,7 @@ st.download_button(
     file_name="parsed_zamowienie.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-# eksport do Excela
-def to_excel(df_in: pd.DataFrame) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df_in.to_excel(w, index=False, sheet_name="Zamówienie")
-    return buf.getvalue()
 
-st.download_button(
     label="Pobierz wynik jako Excel",
     data=to_excel(df),
     file_name="parsed_zamowienie.xlsx",
