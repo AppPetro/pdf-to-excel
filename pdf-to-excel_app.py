@@ -10,7 +10,7 @@ st.title("PDF → Excel")
 
 st.markdown(
     """
-    Wgraj plik PDF ze zamówieniem. Aplikacja:
+    dddWgraj plik PDF ze zamówieniem. Aplikacja:
     1. Próbuje wyciągnąć tekst przez PyPDF2 (stare „trudniejsze” PDF-y).
     2. Jeśli w wyciągniętym przez PyPDF2 tekście nie występują układy D ani E, 
        używa starych parserów (układ B, C lub A).
