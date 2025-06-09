@@ -65,6 +65,10 @@ def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
 
 
 def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
+    """
+    Układ E – każdemu Lp przypisujemy pierwszy następujący po nim EAN,
+    ale usuwamy go z dalszej puli, żeby nie pojawił się ponownie.
+    """
     # 1) Zbierz pozycje (index, Lp, Ilość)
     pat_item = re.compile(r"^(\d+)\s+.+?\s+(\d{1,3})\s+szt\.", re.IGNORECASE)
     items = []
@@ -81,12 +85,22 @@ def parse_layout_e(all_lines: list[str]) -> pd.DataFrame:
         if m:
             eans.append({"idx": i, "ean": m.group(1)})
 
-    # 3) Dopasuj do każdej pozycji pierwszy ean z idx > item.idx
+    # 3) Przypisuj po kolei, usuwając wykorzystane eany
     products = []
+    remaining = eans.copy()
     for it in items:
-        cand = [e for e in eans if e["idx"] > it["idx"]]
-        sym = min(cand, key=lambda e: e["idx"])["ean"] if cand else ""
-        products.append({"Lp": it["Lp"], "Symbol": sym, "Ilość": it["Ilość"]})
+        cand = [e for e in remaining if e["idx"] > it["idx"]]
+        if cand:
+            chosen = min(cand, key=lambda e: e["idx"])
+            symbol = chosen["ean"]
+            remaining.remove(chosen)
+        else:
+            symbol = ""
+        products.append({
+            "Lp": it["Lp"],
+            "Symbol": symbol,
+            "Ilość": it["Ilość"]
+        })
 
     return pd.DataFrame(products)
 
@@ -114,8 +128,9 @@ def parse_layout_c(all_lines: list[str]) -> pd.DataFrame:
         ean = all_lines[max(before)] if before else ""
         qty = None
         for j in range(lp_i+1, len(all_lines)-2):
-            if all_lines[j].lower()=="szt." and re.fullmatch(r"\d+", all_lines[j+2]):
-                qty = int(all_lines[j+2]); break
+            if all_lines[j].lower() == "szt." and re.fullmatch(r"\d+", all_lines[j+2]):
+                qty = int(all_lines[j+2])
+                break
         if qty is not None:
             products.append({"Lp": int(all_lines[lp_i]), "Symbol": ean, "Ilość": qty})
     return pd.DataFrame(products)
@@ -128,7 +143,7 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
             nxt = all_lines[i+1]
             if (
                 re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", nxt)
-                and nxt.lower()!="szt."
+                and nxt.lower() != "szt."
                 and not re.fullmatch(r"\d{1,3}(?: \d{3})*,\d{2}", nxt)
                 and not nxt.lower().startswith("kod kres")
             ):
@@ -136,14 +151,15 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
     idx_ean = [i for i, ln in enumerate(all_lines) if ln.lower().startswith("kod kres")]
     products = []
     for k, lp_i in enumerate(idx_lp):
-        prev_i = idx_lp[k-1] if k>0 else -1
-        next_i = idx_lp[k+1] if k+1<len(idx_lp) else len(all_lines)
-        val = [e for e in idx_ean if prev_i<e<next_i]
+        prev_i = idx_lp[k-1] if k > 0 else -1
+        next_i = idx_lp[k+1] if k+1 < len(idx_lp) else len(all_lines)
+        val = [e for e in idx_ean if prev_i < e < next_i]
         ean = all_lines[max(val)].split(":",1)[1].strip() if val else ""
         qty = None
         for j in range(lp_i+1, next_i):
-            if re.fullmatch(r"\d+", all_lines[j]) and all_lines[j+1].lower()=="szt.":
-                qty = int(all_lines[j]); break
+            if re.fullmatch(r"\d+", all_lines[j]) and all_lines[j+1].lower() == "szt.":
+                qty = int(all_lines[j])
+                break
         if qty is not None:
             products.append({"Lp": int(all_lines[lp_i]), "Symbol": ean, "Ilość": qty})
     return pd.DataFrame(products)
@@ -153,10 +169,11 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
 
 uploaded = st.file_uploader("Wybierz plik PDF ze zamówieniem", type=["pdf"])
 if not uploaded:
-    st.info("Proszę wgrać plik PDF, aby kontynuować."); st.stop()
+    st.info("Proszę wgrać plik PDF, aby kontynuować.")
+    st.stop()
 pdf_bytes = uploaded.read()
 
-# spróbuj PyPDF2
+# próba PyPDF2
 lines_py = extract_text_with_pypdf2(pdf_bytes)
 pat_d = re.compile(r"^\d{13}.*\d{1,3},\d{2}\s+szt", re.IGNORECASE)
 pat_e = re.compile(r"^\d+\s+.+?\s+\d{1,3}\s+szt\.", re.IGNORECASE)
@@ -168,11 +185,14 @@ df = pd.DataFrame()
 if lines_py and not (is_d_py or is_e_py):
     is_b_py = any(re.compile(r"^\d+\s+\d{13}\s+.+\s+\d{1,3},\d{2}\s+szt", re.IGNORECASE).match(ln) for ln in lines_py)
     is_c_py = any(re.fullmatch(r"\d{13}", ln) for ln in lines_py) and not is_b_py
-    if is_b_py: df = parse_layout_b(lines_py)
-    elif is_c_py: df = parse_layout_c(lines_py)
-    else:       df = parse_layout_a(lines_py)
+    if is_b_py:
+        df = parse_layout_b(lines_py)
+    elif is_c_py:
+        df = parse_layout_c(lines_py)
+    else:
+        df = parse_layout_a(lines_py)
 
-# jeśli nic, puść pdfplumber
+# jeśli nic, pdfplumber
 if df.empty:
     lines_new = extract_text_with_pdfplumber(pdf_bytes)
     if not lines_new:
@@ -182,13 +202,18 @@ if df.empty:
     is_b = any(re.compile(r"^\d+\s+\d{13}\s+.+\s+\d{1,3},\d{2}\s+szt", re.IGNORECASE).match(ln) for ln in lines_new)
     is_c = any(re.fullmatch(r"\d{13}", ln) for ln in lines_new) and not is_b
 
-    if is_d:      df = parse_layout_d(lines_new)
-    elif is_e:    df = parse_layout_e(lines_new)
-    elif is_b:    df = parse_layout_b(lines_new)
-    elif is_c:    df = parse_layout_c(lines_new)
-    else:         df = parse_layout_a(lines_new)
+    if is_d:
+        df = parse_layout_d(lines_new)
+    elif is_e:
+        df = parse_layout_e(lines_new)
+    elif is_b:
+        df = parse_layout_b(lines_new)
+    elif is_c:
+        df = parse_layout_c(lines_new)
+    else:
+        df = parse_layout_a(lines_new)
 
-# porządkuj i weryfikacja
+# porządkowanie
 if "Ilość" in df:
     df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
 
@@ -199,7 +224,9 @@ if df.empty:
 max_lp = int(df["Lp"].max())
 unique_ean = df["Symbol"].nunique()
 if max_lp != unique_ean:
-    st.warning(f"Uwaga! Znalazłem {max_lp} pozycji, ale tylko {unique_ean} unikalnych kodów EAN – sprawdź, czy parsowanie się nie pogubiło.")
+    st.warning(
+        f"Uwaga! Znalazłem {max_lp} pozycji, ale tylko {unique_ean} unikalnych kodów EAN – sprawdź, czy parsowanie się nie pogubiło."
+    )
 
 st.subheader("Wyekstrahowane pozycje zamówienia")
 st.dataframe(df, use_container_width=True)
