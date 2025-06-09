@@ -12,16 +12,17 @@ st.markdown(
     """
     Wgraj plik PDF ze zamówieniem. Aplikacja:
     1. Próbuje wyciągnąć tekst przez PyPDF2, a gdy to się nie uda – przez pdfplumber.
-    2. Najpierw sprawdza, czy mamy "pełne" linie z EAN-em i ilością (layout D):
+    2. Próbuje znaleźć pełne linie z EAN-em i ilością (layout D):
        linia zaczyna się od 13 cyfr i zawiera ",<xx> szt.".
-    3. Jeśli znajdzie takie linie, parsuje je jako oddzielne pozycje z autoinkrementowanym Lp.
+    3. Jeśli znajdzie takie linie, zwraca je jako pozycje z automatycznie numerowanym Lp.
     4. W przeciwnym razie przechodzi do trybu uniwersalnego:
-       - Buduje się mapa wszystkich 13-cyfrowych EAN-ów w tekście.
-       - Przechodzi przez kolejne linie, śledząc najnowszy EAN oraz numer Lp (czysta linia z cyframi).
-       - Gdy natrafi na ilość (liczba + "szt."), zapisuje wpis {Lp, Symbol: aktualny EAN, Ilość}.
-    5. Wynik wyświetla się w tabeli i można pobrać go jako plik Excel.
+       - Tworzy mapę wszystkich 13-cyfrowych EAN-ów w tekście.
+       - Przetwarza linie: aktualizuje bieżący EAN, rozpoznaje Lp i ilość przy słowie "szt.".
+       - Dla każdej wykrytej ilości zapisuje wiersz {Lp, Symbol: aktualny EAN, Ilość}.
+    5. Wynik wyświetla się w tabeli i można go pobrać jako Excel.
     """
 )
+
 
 def extract_text(pdf_bytes: bytes) -> list[str]:
     # PyPDF2
@@ -48,38 +49,35 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
 
 
 def parse_records(lines: list[str]) -> pd.DataFrame:
-    # 1) Spróbuj layout D (pełna linia: EAN + ",<qty> szt.")
-    pattern_full = re.compile(r"^(\d{13}).*?(\d{1,3}),\d{2}\s*szt", re.IGNORECASE)
-    out = []
+    # 1) Layout D – linie zaczynające się od 13 cyfr i zawierające ',<qty> szt.'
+    pattern_full = re.compile(r"^(\d{13}).*?(\d{1,4}),\d{2}\s*szt", re.IGNORECASE)
+    records = []
     lp_counter = 1
     for ln in lines:
         m = pattern_full.match(ln)
         if m:
-            out.append({"Lp": lp_counter, "Symbol": m.group(1), "Ilość": int(m.group(2))})
+            ean = m.group(1)
+            qty = int(m.group(2))
+            records.append({"Lp": lp_counter, "Symbol": ean, "Ilość": qty})
             lp_counter += 1
-    if out:
-        return pd.DataFrame(out)
+    if records:
+        return pd.DataFrame(records)
 
     # 2) Tryb uniwersalny
-    # mapa ean -> jego ostatnie wystąpienie
-    ean_idx = {}
-    for i, ln in enumerate(lines):
-        for ean in re.findall(r"\b(\d{13})\b", ln):
-            ean_idx[i] = ean
-
     records = []
     current_ean = None
     current_lp = None
+
     for ln in lines:
-        # aktualizuj ean, jeśli jest w linii
+        # aktualizuj EAN, jeśli w linii jest 13-cyfrowy ciąg
         m_ean = re.search(r"\b(\d{13})\b", ln)
         if m_ean:
             current_ean = m_ean.group(1)
 
-        # wykryj Lp jako osobną linię z cyframi
+        # wykryj Lp jako osobną linię z kilkoma cyframi
         m_lp = re.fullmatch(r"(\d{1,3})", ln)
         if m_lp:
             current_lp = int(m_lp.group(1))
 
-        # wykryj ilość przed 'szt.'
+        # wykryj ilość przy słowie 'szt.'
         m_qty = re.search(r"(\d{1,4})\s*szt\.?",
