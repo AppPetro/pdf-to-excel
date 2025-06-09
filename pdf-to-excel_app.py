@@ -162,7 +162,13 @@ else:
     df = parse_a(lines)
 
 # finalizacja
-df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
+# Upewnij się, że mamy kolumnę "Ilość"
+if "Ilość" not in df.columns:
+    st.error("Parser nie zwrócił kolumny 'Ilość'. Sprawdź format PDF i konfigurację parsera.")
+    st.stop()
+# Usuń wiersze bez ilości i zresetuj indeks
+if not df.empty:
+    df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
 if df.empty:
     st.error("Po parsowaniu nie znaleziono pozycji zamówienia.")
     st.stop()
@@ -170,6 +176,19 @@ if df.empty:
 st.subheader("Wyekstrahowane pozycje zamówienia")
 st.dataframe(df, use_container_width=True)
 
+# eksport do Excela
+def to_excel(df_in: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df_in.to_excel(w, index=False, sheet_name="Zamówienie")
+    return buf.getvalue()
+
+st.download_button(
+    label="Pobierz wynik jako Excel",
+    data=to_excel(df),
+    file_name="parsed_zamowienie.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
 # eksport do Excela
 def to_excel(df_in: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
