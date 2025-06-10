@@ -1,112 +1,154 @@
-#!/usr/bin/env python3
-"""
-pdf_to_excel.py
-
-Extracts tabular data from a PDF purchase order, correctly merging rows
-that span page breaks and avoiding duplicate EANs, then writes the result
-to an Excel file.
-
-Usage:
-    python pdf_to_excel.py input.pdf -o output.xlsx
-
-Dependencies:
-    pip install pdfplumber pandas openpyxl
-"""
-
-import re
-import argparse
-import pdfplumber
+import streamlit as st
 import pandas as pd
+import re
+import io
+import PyPDF2
+import pdfplumber
 
-EAN_REGEX = re.compile(r'(\d{8,13})')  # Adjust length if needed
-NEW_ROW_REGEX = re.compile(r'^\s*(\d+)\s+')  # Lines starting with LP (number + space)
+# Konfiguracja aplikacji
+st.set_page_config(page_title="PDF → Excel", layout="wide")
+st.title("PDF → Excel")
 
-def extract_ean(text: str) -> str:
-    """Find the first EAN (barcode) in the text."""
-    m = EAN_REGEX.search(text)
-    return m.group(1) if m else ''
-
-def process_pdf(path: str) -> pd.DataFrame:
+st.markdown(
     """
-    Reads the PDF, extracts all lines of text, and merges broken rows
-    so that cells spanning pages stay together.
+    Wgraj plik PDF ze zamówieniem. Aplikacja:
+    1. Wydobywa tekst przez PyPDF2, a jeśli nie zadziała – przez pdfplumber.
+    2. Scala wiersze rozbite między stronami (kontynuacje bez numeru LP).
+    3. Wykrywa układ i parsuje tabelę **Lp | Symbol | Ilość**.
+    4. Sprawdza, czy liczba pozycji (max Lp) zgadza się z liczbą unikalnych EAN-ów.
+    5. Umożliwia pobranie wyników jako Excel.
     """
-    all_lines = []
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
-                continue
-            # Split into individual lines
-            lines = text.split('\n')
-            all_lines.extend(lines)
+)
 
-    records = []
-    current = None
+# Regex wykrywające początek nowego wiersza (numer LP) i EAN
+NEW_ROW_REGEX = re.compile(r"^\s*\d+\s+")
+EAN_REGEX = re.compile(r"(\d{8,13})")
 
-    for line in all_lines:
-        line = line.strip()
-        if not line:
+
+def merge_continued_lines(lines: list[str]) -> list[str]:
+    """
+    Scala fragmenty tekstu: jeśli linia nie zaczyna się od LP, dokleja ją
+    do poprzedniej jako kontynuację.
+    """
+    merged = []
+    for ln in lines:
+        text = ln.strip()
+        if not text:
             continue
-
-        # If line starts with an LP number => start of a new record
-        if NEW_ROW_REGEX.match(line):
-            # Save previous record
-            if current:
-                records.append(current)
-            # Initialize new record dict
-            # Split columns by two or more spaces (common delimiter in PDF text)
-            cols = re.split(r'\s{2,}', line)
-            lp = cols[0].strip()
-            # You can expand this to parse other columns like 'index', 'name', 'vat', etc.
-            description = ' '.join(cols[1:])  # everything else goes into description initially
-            current = {
-                'lp': lp,
-                'description': description,
-                'ean': '',
-            }
+        if NEW_ROW_REGEX.match(text):
+            merged.append(text)
         else:
-            # Continuation of the previous record
-            if not current:
-                # If we see continuation without a current record, skip
-                continue
-            # If it's an EAN line, extract and assign
-            if 'Kod kres' in line or 'EAN' in line:
-                ean = extract_ean(line)
-                if ean:
-                    current['ean'] = ean
+            # kontynuacja poprzedniego wiersza
+            if merged:
+                merged[-1] += ' ' + text
             else:
-                # Otherwise it's a continuation of the description/name
-                current['description'] += ' ' + line
+                merged.append(text)
+    return merged
 
-    # Append the last record
-    if current:
-        records.append(current)
 
-    # Build DataFrame
-    df = pd.DataFrame(records, columns=['lp', 'description', 'ean'])
+def extract_text_with_pypdf2(pdf_bytes: bytes) -> list[str]:
+    try:
+        reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+    except Exception:
+        return []
+    lines = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for ln in text.split("\n"):
+            ln = ln.strip()
+            if ln:
+                lines.append(ln)
+    return lines
 
-    # Remove exact duplicates of lp+ean (keep first)
-    df = df.drop_duplicates(subset=['lp', 'ean'], keep='first')
 
-    return df
+def extract_text_with_pdfplumber(pdf_bytes: bytes) -> list[str]:
+    lines = []
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                for ln in text.split("\n"):
+                    ln = ln.strip()
+                    if ln:
+                        lines.append(ln)
+    except Exception:
+        return []
+    return lines
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Extract tables from PDF and write to Excel, merging "
-                    "rows broken at page boundaries."
+
+def parse_layout_default(all_lines: list[str]) -> pd.DataFrame:
+    """
+    Prosty parser domyślny – znajduje LP, ilość i EAN w jednej linii lub w kontynuacji.
+    Linia musi zawierać LP i ilość, EAN musi być w fragmencie "Kod kres".
+    """
+    pat_item = re.compile(r"^(\d+)\s+.*?(\d{1,3})\s+szt", re.IGNORECASE)
+    pat_ean  = re.compile(r"kod kres\.?\s*:\s*(\d{8,13})", re.IGNORECASE)
+
+    products = []
+    for ln in all_lines:
+        m_item = pat_item.search(ln)
+        if not m_item:
+            continue
+        lp = int(m_item.group(1))
+        qty = int(m_item.group(2))
+        # EAN w tej samej linii?
+        m_ean = pat_ean.search(ln)
+        symbol = m_ean.group(1) if m_ean else ''
+        # jeśli nie, spróbuj znaleźć w fragmencie po spacji
+        if not symbol and 'kod kres' in ln.lower():
+            e = EAN_REGEX.search(ln)
+            symbol = e.group(1) if e else ''
+        products.append({"Lp": lp, "Symbol": symbol, "Ilość": qty})
+
+    return pd.DataFrame(products)
+
+
+# Główna logika
+uploaded = st.file_uploader("Wybierz plik PDF ze zamówieniem", type=["pdf"])
+if not uploaded:
+    st.info("Proszę wgrać plik PDF, aby kontynuować.")
+    st.stop()
+pdf_bytes = uploaded.read()
+
+# 1) Ekstrakcja tekstu
+lines = extract_text_with_pypdf2(pdf_bytes)
+if not lines:
+    lines = extract_text_with_pdfplumber(pdf_bytes)
+    if not lines:
+        st.error("Nie udało się wyciągnąć tekstu z PDF-a.")
+        st.stop()
+
+# 2) Scalanie kontynuacji
+merged = merge_continued_lines(lines)
+
+# 3) Parsowanie (domyślny uniwersalny parser)
+df = parse_layout_default(merged)
+
+# Walidacja
+if df.empty:
+    st.error("Po parsowaniu nie znaleziono pozycji.")
+    st.stop()
+max_lp     = int(df['Lp'].max())
+unique_ean = df['Symbol'].nunique()
+if max_lp != unique_ean:
+    st.warning(
+        f"Znaleziono {max_lp} pozycji, ale tylko {unique_ean} unikalnych kodów EAN – sprawdź parsowanie."
     )
-    parser.add_argument('pdf', help="Path to input PDF file")
-    parser.add_argument(
-        '-o', '--output',
-        default='output.xlsx',
-        help="Path to output Excel file (default: output.xlsx)"
-    )
-    args = parser.parse_args()
 
-    df = process_pdf(args.pdf)
-    df.to_excel(args.output, index=False)
-    print(f"✔ Saved {len(df)} rows to '{args.output}'")
+# Wyświetlenie i pobranie
+st.subheader("Wyekstrahowane pozycje zamówienia")
+st.dataframe(df, use_container_width=True)
 
-if __name__ == '__main__':
-    main()
+
+def convert_df_to_excel(df_in: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_in.to_excel(writer, index=False, sheet_name="Zamówienie")
+    return buf.getvalue()
+
+st.download_button(
+    label="Pobierz jako Excel",
+    data=convert_df_to_excel(df),
+    file_name="parsed_zamowienie.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
