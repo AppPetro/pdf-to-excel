@@ -1,5 +1,4 @@
-PyPDF2
+pdfplumber
 pandas
 openpyxl
 streamlit
-pdfplumber
