@@ -31,29 +31,31 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
     except Exception:
         return []
 
+
 def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     """
     Parsuje linię:
     Lp  Nazwa ...  Ilość szt  EAN(13)  Masa
-    bez nagłówków – sam pattern.
+    Akceptuje też EAN z kropką na końcu (np. 9120004635976.)
     """
     products = []
     wz_pat = re.compile(
-        r"^(\d+)\s+"         # grupa 1: Lp
-        r"(.+?)\s+"          # grupa 2: Nazwa (najkrócej jak się da)
-        r"([\d,]+)\s+szt\s+" # grupa 3: Ilość
-        r"(\d{13})\s+"       # grupa 4: EAN
-        r"([\d,]+)"          # grupa 5: Masa
+        r"^(\d+)\s+"            # grupa 1: Lp
+        r"(.+?)\s+"             # grupa 2: Nazwa
+        r"([\d,]+)\s+szt\s+"    # grupa 3: Ilość
+        r"(\d{13}\.?)\s+"       # grupa 4: EAN (13 cyfr + opcjonalna kropka)
+        r"([\d,]+)$"            # grupa 5: Masa
     )
     for ln in all_lines:
         if m := wz_pat.match(ln):
-            lp   = int(m.group(1))
-            name = m.group(2)
-            qty  = int(float(m.group(3).replace(",", ".")))
-            ean  = m.group(4)
-            # masę ignorujemy w danych wyjściowych lub można dodać jako kolumnę
+            lp      = int(m.group(1))
+            name    = m.group(2)
+            qty     = int(float(m.group(3).replace(",", ".")))
+            ean_raw = m.group(4)
+            ean     = ean_raw.rstrip('.')   # usuń kropkę, jeśli występuje
             products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
     return pd.DataFrame(products)
+
 
 # — dotychczasowe parsery fakturowe —
 def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
@@ -157,9 +159,9 @@ lines = [re.sub(r"^(\d+)(?=[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż])", r"\1 
 
 # 4) detekcja WZ/Subiekt GT po wzorcu linii
 wz_pat = re.compile(
-    r"^\d+\s+.+?\s+[\d,]+\s+szt\s+\d{13}\s+[\d,]+"
+    r"^\d+\s+.+?\s+[\d,]+\s+szt\s+\d{13}\.?\s+[\d,]+"
 )
-is_wz = any(wz_pat.match(ln) for ln in lines)  # :contentReference[oaicite:0]{index=0}
+is_wz = any(wz_pat.match(ln) for ln in lines)
 
 # pozostałe detekcje faktur D/E/B/C/A
 pat_d = re.compile(r"^(\d{13})(?:\s+.*?)*\s+(\d{1,3}),\d{2}\s+szt", re.IGNORECASE)
