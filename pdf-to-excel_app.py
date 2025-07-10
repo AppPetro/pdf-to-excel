@@ -43,15 +43,6 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
 
 
 def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
-    """
-    Parsuje Zlecenie/WZ:
-    - Dla każdej linii zaczynającej się od Lp i zawierającej 'szt.':
-        • Lp, Ilość
-        • Symbol: najpierw literalne 'Kod kreskowy',
-          potem cyfry po 'szt.',
-          a gdy brak, sprawdzamy następną linię na 13 cyfr.
-    - Fallback: kolumnowy układ z EAN w Symbolu.
-    """
     products = []
     for idx, ln in enumerate(all_lines):
         if not re.match(r"^\d+", ln) or "szt." not in ln.lower():
@@ -69,17 +60,14 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
         if m_kod:
             ean = m_kod.group(1)
         else:
-            # cyfry po 'szt.'
             m_after = re.search(r"szt\.\s*([0-9]{13})", ln)
             if m_after:
                 ean = m_after.group(1)
             else:
-                # następna linia to EAN?
                 ean = all_lines[idx+1].strip() if idx+1 < len(all_lines) and re.fullmatch(r"\d{13}", all_lines[idx+1].strip()) else ""
         products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
     if products:
         return pd.DataFrame(products)
-    # Fallback: kolumnowy układ
     pat2 = re.compile(r"^(\d+)\s+(\d{13})\s+.+?\s+([\d,]+)\s+szt\.")
     products = []
     for ln in all_lines:
@@ -91,7 +79,7 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
             })
     return pd.DataFrame(products)
 
-# Parsery fakturowe D, E, B, C, A (bez zmian)
+# Parsery fakturowe D, E, B, C, A
 
 def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
     products = []
@@ -175,3 +163,63 @@ def parse_layout_a(all_lines: list[str]) -> pd.DataFrame:
     return pd.DataFrame(products)
 
 # Główna logika
+uploaded_file = st.file_uploader("Wybierz plik PDF", type=["pdf"])
+if not uploaded_file:
+    st.info("Proszę wgrać plik PDF, aby kontynuować.")
+    st.stop()
+
+pdf_bytes = uploaded_file.read()
+lines = extract_text(pdf_bytes)
+
+# 1) usuń stopki/numerację stron
+lines = [ln for ln in lines if not ln.startswith("/") and "Strona" not in ln]
+# 2) spacja między Lp a nazwą
+lines = [re.sub(r"^(\d+)(?=[A-Za-z])", r"\1 ", ln) for ln in lines]
+
+# Detekcja formatu
+is_wz   = any(re.match(r"^\d+.*szt\.", ln) for ln in lines)
+has_kres= any(ln.lower().startswith("kod kres") for ln in lines)
+is_d    = any(re.match(r"^\d{13}", ln) for ln in lines)
+is_e    = any(re.match(r"^\d+\s+.+?\s+\d{1,3}\s+szt\.", ln) for ln in lines) and has_kres
+is_b    = any(re.match(r"^\d+\s+\d{13}", ln) for ln in lines)
+has_plain= any(re.fullmatch(r"\d{13}", ln) for ln in lines)
+is_c    = has_plain and not is_b
+
+# Wybór parsera
+if is_wz:
+    df = parse_layout_wz(lines)
+elif is_d:
+    df = parse_layout_d(lines)
+elif is_e:
+    df = parse_layout_e(lines)
+elif is_b:
+    df = parse_layout_b(lines)
+elif is_c:
+    df = parse_layout_c(lines)
+else:
+    df = parse_layout_a(lines)
+
+# 5) filtruj puste ilości
+if "Ilość" in df.columns:
+    df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
+if df.empty:
+    st.error("Po parsowaniu nie znaleziono pozycji.")
+    st.stop()
+
+# 6) statystyki i komunikaty
+total   = df.shape[0]
+unique  = df["Symbol"].nunique()
+sum_qty = int(df["Ilość"].sum())
+missing = df["Symbol"].eq("").sum()
+if missing > 0:
+    st.error(f"Brakuje EAN w {missing} pozycjach!")
+elif total != unique:
+    st.error(f"Znaleziono w sumie: {total} pozycji  Unikalnych EAN-ów: {unique}")
+else:
+    st.markdown(
+        f"**Znaleziono w sumie:** {total} pozycji  \n"
+        f"**Unikalnych EAN-ów:** {unique}  \n"
+        f"**Łączna ilość:** {sum_qty}"
+    )
+
+# 7) wyświetlenie tabeli i eksport\…
