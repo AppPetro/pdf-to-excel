@@ -215,23 +215,30 @@ if df.empty:
     st.error("Po parsowaniu nie znaleziono pozycji.")
     st.stop()
 
-# 6) sprawdzenie brakujących EAN
-missing = df["Symbol"].isnull() | (df["Symbol"] == "")
-if missing.any():
-    missing_lps = df.loc[missing, "Lp"].tolist()
-    st.error(f"Brakuje EAN dla pozycji: {', '.join(map(str, missing_lps))}")
+# 6) wykrycie Lp, które nie zostały sparsowane (np. brakujący EAN)
+all_lps = [
+    int(m.group(1)) for ln in lines
+    if (m := re.match(r"^(\d+)\s+.+\s+[\d,]+\s+szt\.", ln))
+]
+parsed_lps = df["Lp"].astype(int).tolist()
+missing_lps = sorted(set(all_lps) - set(parsed_lps))
+if missing_lps:
+    st.error(f"Brakuje EAN (nie sparsowano) dla pozycji: {', '.join(map(str, missing_lps))}")
 
-# 7) statystyki i walidacja duplikatów
-total  = df.shape[0]
-unique = df["Symbol"].nunique()
-sum_qty= int(df["Ilość"].sum())
+# 7) statystyki i walidacja spójności
+total    = len(all_lps)
+parsed   = df.shape[0]
+unique_e = df["Symbol"].nunique()
+sum_qty  = int(df["Ilość"].sum())
 
-if total != unique:
-    st.error(f"Liczba pozycji ({total}) różni się od liczby unikalnych EAN-ów ({unique}).")
+if parsed != total:
+    st.error(f"Sparsowano {parsed} z {total} pozycji.")
+if unique_e != total:
+    st.error(f"Liczba pozycji ({total}) różni się od liczby unikalnych EAN-ów ({unique_e}).")
 
 st.markdown(
     f"**Znaleziono w sumie:** {total} pozycji  \n"
-    f"**Unikalnych EAN-ów:** {unique}  \n"
+    f"**Unikalnych EAN-ów:** {unique_e}  \n"
     f"**Łączna ilość:** {sum_qty}"
 )
 
