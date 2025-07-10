@@ -5,8 +5,9 @@ import io
 import pdfplumber
 
 # Konfiguracja aplikacji
-st.set_page_config(page_title="PDF → Excel", layout="wide")
-st.title("PDF → Excel")
+title = "PDF → Excel"
+st.set_page_config(page_title=title, layout="wide")
+st.title(title)
 
 st.markdown(
     """
@@ -15,11 +16,11 @@ st.markdown(
     2. Usuwamy stopki / numerację stron.
     3. Wstawiamy brakującą spację między numerem a nazwą.
     4. Wykrywamy format “WZ/Subiekt GT” i parsujemy EAN:
-       - Dla każdej linii rozpoczynającej się od numeru pozycji i zawierającej 'szt.':
+       - Dla każdej linii zaczynającej się od Lp i zawierającej 'szt.':
          • Lp: pierwsza liczba
          • Ilość: liczba przed 'szt.'
-         • Symbol: 13-cyfrowy EAN wyszukany gdziekolwiek w tej linii (lub puste)
-       - Fallback dla układu kolumnowego z EAN w kolumnie Symbol.
+         • Symbol: EAN(13) z pola 'Kod kreskowy:' lub z cyfr po 'szt.'
+       - Fallback: układ kolumnowy z EAN w kolumnie Symbol.
     5. Albo – jeśli to faktura – layouty D, E, B, C lub A.
     6. Pokazujemy tabelę, komunikaty o brakach EAN, statystyki i eksport do Excela.
     """
@@ -48,28 +49,35 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     """
     Parsuje Zlecenie/WZ:
     - Dla każdej linii zaczynającej się od Lp i zawierającej 'szt.':
-      Lp, Ilość i EAN z tej samej linii (13 cyfr) lub puste.
+      Lp, Ilość i EAN:
+        1. z literalnego pola 'Kod kreskowy: 13-cyfrowy kod'
+        2. jeśli brak, z cyfr następujących po 'szt.'
     - Fallback: układ kolumnowy z EAN w Symbolu.
     """
     products = []
     for ln in all_lines:
-        if not re.match(r"^\d+", ln) or "szt." not in ln:
+        if not re.match(r"^\d+", ln) or "szt." not in ln.lower():
             continue
         parts = ln.split()
         lp = int(parts[0])
         # Ilość
         try:
-            idx = parts.index("szt.")
+            idx = [p.lower() for p in parts].index("szt.")
             qty = int(float(parts[idx-1].replace(",", ".")))
         except ValueError:
             qty = None
-        # EAN z tej samej linii
-        m = re.search(r"(\d{13})", ln)
-        ean = m.group(1) if m else ""
+        # EAN z pola 'Kod kreskowy:'
+        m_kod = re.search(r"kod\s*kreskowy[:\s]*([0-9]{13})", ln, re.IGNORECASE)
+        if m_kod:
+            ean = m_kod.group(1)
+        else:
+            # EAN po 'szt.'
+            m_after = re.search(r"szt\.\s*([0-9]{13})", ln)
+            ean = m_after.group(1) if m_after else ""
         products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
     if products:
         return pd.DataFrame(products)
-    # Fallback kolumnowy
+    # Fallback: kolumnowy układ
     pat2 = re.compile(r"^(\d+)\s+(\d{13})\s+.+?\s+([\d,]+)\s+szt\.")
     for ln in all_lines:
         if m := pat2.match(ln):
@@ -79,6 +87,7 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
                 "Ilość": int(float(m.group(3).replace(",", ".")))
             })
     return pd.DataFrame(products)
+
 
 # Parsery fakturowe D, E, B, C, A (bez zmian)
 
@@ -244,5 +253,5 @@ st.download_button(
     label="Pobierz jako Excel",
     data=to_excel(df),
     file_name="parsed_zamowienie.xlsx",
-    mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet"
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
