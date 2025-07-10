@@ -14,10 +14,13 @@ st.markdown(
     2. Usuwamy stopki/numerację stron.  
     3. Wstawiamy brakującą spację między numerem a nazwą.  
     4. Wykrywamy format “WZ/Subiekt GT” i parsujemy EAN:
-       - Pierwsza próba: ilość + 'szt.' + EAN w tej samej linii (nawet po kilku kolumnach).  
-       - Fallback: kolumna Symbol zawiera sam EAN (Lp, EAN, …, ilość).  
-    5. Albo – jeśli to faktura – D, E, B, C lub A.  
-    6. Pokazujemy tabelę, statystyki i eksport do Excela.
+       - Dla każdego wiersza produktu Lp→Nazwa→…→‘szt.’  
+         • numerujemy Lp  
+         • wyciągamy Ilość  
+         • wstawiamy spację przed ostatnimi 13 cyframi,  
+         • wyciągamy 13-cyfrowy EAN (bez kropki) lub zostawiamy puste.  
+       - Jeśli to nie WZ, lecimy dalej D/E/B/C/A.  
+    5. Pokazujemy tabelę, statystyki i umożliwiamy eksport do Excela.
     """
 )
 
@@ -36,43 +39,40 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
 
 def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     """
-    Parsuje najpierw pattern '<ilość> szt.' + ... + '<EAN[.]>',
-    a jeśli nie znajdzie nic, fallback:
-    '^Lp  <EAN>  ...  <ilość> szt.'
+    Parsuje “Zlecenie/WZ” tak, żeby:
+    - pobrać każdą linię zaczynającą się od liczby Lp i zawierającą 'szt.',
+    - dla każdej:
+      1. wyciągnąć ilość,
+      2. dopisać spację przed ostatnimi 13 cyframi (ew. z kropką),
+      3. wyciągnąć EAN z tej samej linii (lub zostawić puste),
+      4. dodać do wyników.
     """
     products = []
-    lp = 1
-
-    # 1) pierwsza próba: Kod kreskowy w tej samej linii po 'szt.' (✂️ zmiana)
-    pat1 = re.compile(r"([\d,]+)\s+szt\..*?(\d{13}\.?)")
     for ln in all_lines:
-        if m := pat1.search(ln):
-            qty = int(float(m.group(1).replace(",", ".")))
-            ean = m.group(2).rstrip(".")
-            products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
-            lp += 1
+        # tylko wiersze produktów: zaczynają się od numeru i mają 'szt.'
+        if not re.match(r"^\d+\s+", ln) or "szt." not in ln:
+            continue
 
-    # jeśli cokolwiek znaleźliśmy, od razu zwracamy
-    if products:
-        return pd.DataFrame(products)
+        # 1) Lp
+        m_lp = re.match(r"^(\d+)", ln)
+        lp = int(m_lp.group(1)) if m_lp else len(products) + 1
 
-    # 2) fallback: układ kolumnowy z EAN w Symbolu
-    pat2 = re.compile(
-        r"^(\d+)\s+"         # Lp
-        r"(\d{13})\s+"       # Symbol=EAN
-        r".+?\s+"            # Nazwa i inne kolumny
-        r"([\d,]+)\s+szt\."  # Ilość
-    )
-    for ln in all_lines:
-        if m := pat2.match(ln):
-            lp2  = int(m.group(1))
-            ean2 = m.group(2)
-            qty2 = int(float(m.group(3).replace(",", ".")))
-            products.append({"Lp": lp2, "Symbol": ean2, "Ilość": qty2})
+        # 2) Ilość
+        m_qty = re.search(r"([\d,]+)\s+szt\.", ln)
+        qty = int(float(m_qty.group(1).replace(",", "."))) if m_qty else None
+
+        # 3) ✂️ zmiana: wstaw spację przed ostatnimi 13 cyframi w wierszu
+        ln_fixed = re.sub(r"([\d,]+)(\d{13}\.?)$", r"\1 \2", ln)
+
+        # 4) EAN (13 cyfr, obcinamy kropkę)
+        m_ean = re.search(r"(\d{13})\.?", ln_fixed)
+        ean = m_ean.group(1) if m_ean else ""
+
+        products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
 
     return pd.DataFrame(products)
 
-# — pozostałe parsery fakturowe D, E, B, C, A — (bez zmian) —
+# — pozostałe parsery fakturowe D, E, B, C, A — (bez żadnych zmian) —
 
 def parse_layout_d(all_lines: list[str]) -> pd.DataFrame:
     products=[]; lp=1
@@ -164,17 +164,16 @@ if not uploaded_file:
 pdf_bytes = uploaded_file.read()
 lines = extract_text(pdf_bytes)
 
-# 1) usuń stopki/numerację
+# 1) usuń stopki/numerację stron
 lines = [ln for ln in lines if not ln.startswith("/") and "Strona" not in ln]
 
 # 2) wstaw spację Lp→Nazwa
 lines = [re.sub(r"^(\d+)(?=[A-Za-z])", r"\1 ", ln) for ln in lines]
 
-# 3) detekcja WZ/Subiekt GT (✂️ zmiana)
-is_wz = any(re.search(r"[\d,]+\s+szt\..*?\d{13}\.?", ln) for ln in lines) \
-    or any(re.match(r"^\d+\s+\d{13}\s+.+?\s+[\d,]+\s+szt\.", ln) for ln in lines)
+# 3) detekcja WZ/Subiekt GT
+is_wz = any(re.match(r"^\d+\s+.+\s+szt\.", ln) for ln in lines)
 
-# pozostałe detekcje faktury
+# pozostałe detekcje faktury D/E/B/C/A
 is_d     = any(re.match(r"^(\d{13})", ln) for ln in lines)
 has_kres = any(ln.lower().startswith("kod kres") for ln in lines)
 is_e     = any(re.match(r"^(\d+)\s+.+?\s+(\d{1,3})\s+szt\.", ln) for ln in lines) and has_kres
@@ -196,14 +195,14 @@ elif is_c:
 else:
     df = parse_layout_a(lines)
 
-# 5) filtr pustych ilości
+# 5) filtrowanie pustych ilości i sprawdzenie
 if "Ilość" in df.columns:
     df = df.dropna(subset=["Ilość"]).reset_index(drop=True)
 if df.empty:
     st.error("Po parsowaniu nie znaleziono pozycji.")
     st.stop()
 
-# 6) statystyki
+# 6) statystyki EAN-ów
 total = df.shape[0]
 unique = df["Symbol"].nunique()
 sum_qty = int(df["Ilość"].sum())
@@ -213,7 +212,7 @@ st.markdown(
     f"**Łączna ilość:** {sum_qty}"
 )
 
-# 7) wynik i eksport
+# 7) wyświetlenie tabeli i eksport do Excela
 st.subheader("Wyekstrahowane pozycje")
 st.dataframe(df, use_container_width=True)
 
