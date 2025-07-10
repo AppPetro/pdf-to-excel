@@ -14,7 +14,7 @@ st.markdown(
     2. Usuwamy stopki/numerację stron.  
     3. Wstawiamy brakującą spację między numerem a nazwą.  
     4. Wykrywamy format “WZ/Subiekt GT” i parsujemy EAN:
-       - Pierwsza próba: ilość + 'szt.' + EAN w polu Kod kreskowy.  
+       - Pierwsza próba: ilość + 'szt.' + EAN w tej samej linii (nawet po kilku kolumnach).  
        - Fallback: kolumna Symbol zawiera sam EAN (Lp, EAN, …, ilość).  
     5. Albo – jeśli to faktura – D, E, B, C lub A.  
     6. Pokazujemy tabelę, statystyki i eksport do Excela.
@@ -36,15 +36,15 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
 
 def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     """
-    Parsuje najpierw pattern '<ilość> szt. <EAN[.]>',
+    Parsuje najpierw pattern '<ilość> szt.' + ... + '<EAN[.]>',
     a jeśli nie znajdzie nic, fallback:
     '^Lp  <EAN>  ...  <ilość> szt.'
     """
     products = []
     lp = 1
 
-    # 1) pierwsza próba: Kod kreskowy przy 'szt.'
-    pat1 = re.compile(r"([\d,]+)\s+szt\.\s+(\d{13}\.?)")
+    # 1) pierwsza próba: Kod kreskowy w tej samej linii po 'szt.' (✂️ zmiana)
+    pat1 = re.compile(r"([\d,]+)\s+szt\..*?(\d{13}\.?)")
     for ln in all_lines:
         if m := pat1.search(ln):
             qty = int(float(m.group(1).replace(",", ".")))
@@ -52,12 +52,11 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
             products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
             lp += 1
 
-    # jeśli coś znalazło, zwracamy od razu
+    # jeśli cokolwiek znaleźliśmy, od razu zwracamy
     if products:
         return pd.DataFrame(products)
 
     # 2) fallback: układ kolumnowy z EAN w Symbolu
-    #    np.: '1  9120004635976  NAZWA...  120,000 szt.'
     pat2 = re.compile(
         r"^(\d+)\s+"         # Lp
         r"(\d{13})\s+"       # Symbol=EAN
@@ -72,7 +71,6 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
             products.append({"Lp": lp2, "Symbol": ean2, "Ilość": qty2})
 
     return pd.DataFrame(products)
-
 
 # — pozostałe parsery fakturowe D, E, B, C, A — (bez zmian) —
 
@@ -172,8 +170,8 @@ lines = [ln for ln in lines if not ln.startswith("/") and "Strona" not in ln]
 # 2) wstaw spację Lp→Nazwa
 lines = [re.sub(r"^(\d+)(?=[A-Za-z])", r"\1 ", ln) for ln in lines]
 
-# 3) detekcja WZ/Subiekt GT
-is_wz = any(re.search(r"[\d,]+\s+szt\.\s+\d{13}\.?", ln) for ln in lines) \
+# 3) detekcja WZ/Subiekt GT (✂️ zmiana)
+is_wz = any(re.search(r"[\d,]+\s+szt\..*?\d{13}\.?", ln) for ln in lines) \
     or any(re.match(r"^\d+\s+\d{13}\s+.+?\s+[\d,]+\s+szt\.", ln) for ln in lines)
 
 # pozostałe detekcje faktury
