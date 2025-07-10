@@ -18,7 +18,7 @@ st.markdown(
        - Fallback 1: kolumna Symbol zawiera sam EAN (Lp, EAN, …, ilość).  
        - Fallback 2: EAN jest na końcu wiersza (jak w “gussto PODOLANY 09.07.pdf”), nawet gdy jest sklejony z inną liczbą.  
     5. Albo – jeśli to faktura – D, E, B, C lub A.  
-    6. Pokazujemy tabelę, statystyki i eksport do Excela.
+    6. Pokazujemy tabelę, statystyki (z kontrolą brakujących i duplikatów) i eksport do Excela.
     """
 )
 
@@ -36,15 +36,10 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
         return []
 
 def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
-    """
-    1) pattern '<ilość> szt. <EAN>'
-    2) fallback: '^Lp  <EAN>  ...  <ilość> szt.'
-    3) fallback: '^Lp  ...  <ilość> szt.  ...  <EAN na końcu>', non-greedy i bez wymaganej spacji
-    """
     products = []
     lp = 1
 
-    # 1) pierwsza próba: '<ilość> szt. <EAN>'
+    # 1) '<ilość> szt. <EAN>'
     pat1 = re.compile(r"([\d,]+)\s+szt\.\s+(\d{13}\.?)")
     for ln in all_lines:
         if m := pat1.search(ln):
@@ -52,36 +47,35 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
             ean = m.group(2).rstrip(".")
             products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
             lp += 1
-
     if products:
         return pd.DataFrame(products)
 
-    # 2) fallback: układ kolumnowy z EAN w Symbolu
+    # 2) kolumnowy: '^Lp  <EAN>  ...  <ilość> szt.'
     pat2 = re.compile(
-        r"^(\d+)\s+"         # Lp
-        r"(\d{13})\s+"       # Symbol=EAN
-        r".+?\s+"            # Nazwa i inne kolumny
-        r"([\d,]+)\s+szt\."  # Ilość
+        r"^(\d+)\s+"
+        r"(\d{13})\s+"
+        r".+?\s+"
+        r"([\d,]+)\s+szt\."
     )
     for ln in all_lines:
         if m := pat2.match(ln):
-            lp2  = int(m.group(1))
-            ean2 = m.group(2)
-            qty2 = int(float(m.group(3).replace(",", ".")))
-            products.append({"Lp": lp2, "Symbol": ean2, "Ilość": qty2})
-
+            products.append({
+                "Lp": int(m.group(1)),
+                "Symbol": m.group(2),
+                "Ilość": int(float(m.group(3).replace(",", ".")))
+            })
     if products:
         return pd.DataFrame(products)
 
-    # 3) drugi fallback: EAN na końcu linii (non-greedy, bez spacji przed EAN)
+    # 3) EAN na końcu linii (non-greedy, bez spacji przed EAN)
     pat3 = re.compile(r"^(\d+)\s+.+\s+([\d,]+)\s+szt\.\s+.*?(\d{13})$")
     for ln in all_lines:
         if m := pat3.match(ln):
-            lp3  = int(m.group(1))
-            qty3 = int(float(m.group(2).replace(",", ".")))
-            ean3 = m.group(3)
-            products.append({"Lp": lp3, "Symbol": ean3, "Ilość": qty3})
-
+            products.append({
+                "Lp": int(m.group(1)),
+                "Symbol": m.group(3),
+                "Ilość": int(float(m.group(2).replace(",", ".")))
+            })
     return pd.DataFrame(products)
 
 # — pozostałe parsery fakturowe D, E, B, C, A — (bez zmian) —
@@ -191,7 +185,7 @@ lines = [ln for ln in lines if not ln.startswith("/") and "Strona" not in ln]
 # 2) wstaw spację Lp→Nazwa
 lines = [re.sub(r"^(\d+)(?=[A-Za-z])", r"\1 ", ln) for ln in lines]
 
-# 3) detekcja WZ/Subiekt GT (rozszerzona o przypadek, gdzie EAN jest na końcu)
+# 3) detekcja WZ/Subiekt GT
 is_wz = (
     any(re.search(r"[\d,]+\s+szt\.\s+\d{13}\.?", ln) for ln in lines)
     or any(re.match(r"^\d+\s+\d{13}\s+.+?\s+[\d,]+\s+szt\.", ln) for ln in lines)
@@ -221,17 +215,27 @@ if df.empty:
     st.error("Po parsowaniu nie znaleziono pozycji.")
     st.stop()
 
-# 6) statystyki
+# 6) sprawdzenie brakujących EAN
+missing = df["Symbol"].isnull() | (df["Symbol"] == "")
+if missing.any():
+    missing_lps = df.loc[missing, "Lp"].tolist()
+    st.error(f"Brakuje EAN dla pozycji: {', '.join(map(str, missing_lps))}")
+
+# 7) statystyki i walidacja duplikatów
 total  = df.shape[0]
 unique = df["Symbol"].nunique()
 sum_qty= int(df["Ilość"].sum())
+
+if total != unique:
+    st.error(f"Liczba pozycji ({total}) różni się od liczby unikalnych EAN-ów ({unique}).")
+
 st.markdown(
     f"**Znaleziono w sumie:** {total} pozycji  \n"
     f"**Unikalnych EAN-ów:** {unique}  \n"
     f"**Łączna ilość:** {sum_qty}"
 )
 
-# 7) wynik i eksport
+# 8) wynik i eksport
 st.subheader("Wyekstrahowane pozycje")
 st.dataframe(df, use_container_width=True)
 
@@ -245,5 +249,5 @@ st.download_button(
     label="Pobierz jako Excel",
     data=to_excel(df),
     file_name="parsed_zamowienie.xlsx",
-    mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
