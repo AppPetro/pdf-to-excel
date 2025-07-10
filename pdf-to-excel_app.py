@@ -16,7 +16,7 @@ st.markdown(
     4. Wykrywamy format “WZ/Subiekt GT” i parsujemy EAN:
        - Pierwsza próba: ilość + 'szt.' + EAN w polu Kod kreskowy.  
        - Fallback 1: kolumna Symbol zawiera sam EAN (Lp, EAN, …, ilość).  
-       - Fallback 2: EAN jest na końcu wiersza (jak w “gussto PODOLANY 09.07.pdf”).  
+       - Fallback 2: EAN jest na końcu wiersza (jak w “gussto PODOLANY 09.07.pdf”), nawet gdy jest sklejony z inną liczbą.  
     5. Albo – jeśli to faktura – D, E, B, C lub A.  
     6. Pokazujemy tabelę, statystyki i eksport do Excela.
     """
@@ -39,7 +39,7 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     """
     1) pattern '<ilość> szt. <EAN>'
     2) fallback: '^Lp  <EAN>  ...  <ilość> szt.'
-    3) fallback: '^Lp  ...  <ilość> szt.  ...  <EAN na końcu>'
+    3) fallback: '^Lp  ...  <ilość> szt.  ...  <EAN na końcu>', non-greedy i bez wymaganej spacji
     """
     products = []
     lp = 1
@@ -53,7 +53,6 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
             products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
             lp += 1
 
-    # jeśli coś znalazło, zwracamy od razu
     if products:
         return pd.DataFrame(products)
 
@@ -74,8 +73,8 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     if products:
         return pd.DataFrame(products)
 
-    # 3) drugi fallback: EAN na końcu linii
-    pat3 = re.compile(r"^(\d+)\s+.+\s+([\d,]+)\s+szt\.\s+.*\s+(\d{13})$")
+    # 3) drugi fallback: EAN na końcu linii (non-greedy, bez spacji przed EAN)
+    pat3 = re.compile(r"^(\d+)\s+.+\s+([\d,]+)\s+szt\.\s+.*?(\d{13})$")
     for ln in all_lines:
         if m := pat3.match(ln):
             lp3  = int(m.group(1))
