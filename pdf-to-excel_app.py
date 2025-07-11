@@ -40,10 +40,10 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     lp = 1
 
     # 1) '<ilość> szt. <EAN>'
-    pat1 = re.compile(r"([\d,]+)\s+szt\.\s+(\d{13}\.?)")
+    pat1 = re.compile(r"([\d\s,]+)\s+szt\.\s+(\d{13}\.?)")
     for ln in all_lines:
         if m := pat1.search(ln):
-            qty = int(float(m.group(1).replace(",", ".")))
+            qty = int(float(m.group(1).replace(" ", "").replace(",", ".")))
             ean = m.group(2).rstrip(".")
             products.append({"Lp": lp, "Symbol": ean, "Ilość": qty})
             lp += 1
@@ -52,29 +52,31 @@ def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
 
     # 2) kolumnowy: '^Lp  <EAN>  ...  <ilość> szt.'
     pat2 = re.compile(
-        r"^(\d+)\s+"
-        r"(\d{13})\s+"
-        r".+?\s+"
-        r"([\d,]+)\s+szt\."
+        r"^(\d+)\s+"           # Lp
+        r"(\d{13})\s+"         # Symbol=EAN
+        r".+?\s+"              # Nazwa i inne
+        r"([\d\s,]+)\s+szt\."  # Ilość (z separatorem tys.)
     )
     for ln in all_lines:
         if m := pat2.match(ln):
+            qty2 = int(float(m.group(3).replace(" ", "").replace(",", ".")))
             products.append({
                 "Lp": int(m.group(1)),
                 "Symbol": m.group(2),
-                "Ilość": int(float(m.group(3).replace(",", ".")))
+                "Ilość": qty2
             })
     if products:
         return pd.DataFrame(products)
 
     # 3) EAN na końcu linii (non-greedy, bez spacji przed EAN)
-    pat3 = re.compile(r"^(\d+)\s+.+\s+([\d,]+)\s+szt\.\s+.*?(\d{13})$")
+    pat3 = re.compile(r"^(\d+)\s+.+\s+([\d\s,]+)\s+szt\.\s+.*?(\d{13})$")
     for ln in all_lines:
         if m := pat3.match(ln):
+            qty3 = int(float(m.group(2).replace(" ", "").replace(",", ".")))
             products.append({
                 "Lp": int(m.group(1)),
                 "Symbol": m.group(3),
-                "Ilość": int(float(m.group(2).replace(",", ".")))
+                "Ilość": qty3
             })
     return pd.DataFrame(products)
 
@@ -185,11 +187,11 @@ lines = [ln for ln in lines if not ln.startswith("/") and "Strona" not in ln]
 # 2) wstaw spację Lp→Nazwa
 lines = [re.sub(r"^(\d+)(?=[A-Za-z])", r"\1 ", ln) for ln in lines]
 
-# 3) detekcja WZ/Subiekt GT
+# 3) detekcja WZ/Subiekt GT (uwzględnia spacje w grupowaniu ilości)
 is_wz = (
-    any(re.search(r"[\d,]+\s+szt\.\s+\d{13}\.?", ln) for ln in lines)
-    or any(re.match(r"^\d+\s+\d{13}\s+.+?\s+[\d,]+\s+szt\.", ln) for ln in lines)
-    or any(re.match(r"^\d+\s+.+\s+[\d,]+\,\d+\s+szt\.\s+.*\d{13}$", ln) for ln in lines)
+    any(re.search(r"[\d\s,]+\s+szt\.\s+\d{13}\.?", ln) for ln in lines)
+    or any(re.match(r"^\d+\s+\d{13}\s+.+?\s+[\d\s,]+\s+szt\.", ln) for ln in lines)
+    or any(re.match(r"^\d+\s+.+\s+[\d\s,]+\,\d+\s+szt\.\s+.*\d{13}$", ln) for ln in lines)
 )
 
 # pozostałe detekcje faktury
@@ -218,7 +220,7 @@ if df.empty:
 # 6) wykrycie Lp, które nie zostały sparsowane (np. brakujący EAN)
 all_lps = [
     int(m.group(1)) for ln in lines
-    if (m := re.match(r"^(\d+)\s+.+\s+[\d,]+\s+szt\.", ln))
+    if (m := re.match(r"^(\d+)\s+.+\s+[\d\s,]+\s+szt\.", ln))
 ]
 parsed_lps = df["Lp"].astype(int).tolist()
 missing_lps = sorted(set(all_lps) - set(parsed_lps))
@@ -256,5 +258,5 @@ st.download_button(
     label="Pobierz jako Excel",
     data=to_excel(df),
     file_name="parsed_zamowienie.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet",
 )
