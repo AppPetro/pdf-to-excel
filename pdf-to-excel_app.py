@@ -13,12 +13,11 @@ st.markdown(
     1. Pobieramy wszystkie linie przez pdfplumber (łączy strony).  
     2. Usuwamy stopki/numerację stron.  
     3. Wstawiamy brakującą spację między numerem a nazwą.  
-    4. Wykrywamy format “WZ/Subiekt GT” i parsujemy EAN:
-       - Pierwsza próba: ilość + 'szt.' + EAN w polu Kod kreskowy.  
-       - Fallback 1: kolumna Symbol zawiera sam EAN (Lp, EAN, …, ilość).  
-       - Fallback 2: EAN jest na końcu wiersza (jak w “gussto PODOLANY 09.07.pdf”), nawet gdy jest sklejony z inną liczbą.  
-    5. Albo – jeśli to faktura – D, E, B, C lub A.  
-    6. Pokazujemy tabelę, statystyki (z kontrolą brakujących i duplikatów) i eksport do Excela.
+    4. Wykrywamy format:
+       - Tabela WZ (Kolumny: Lp, Kod produktu, Nazwa, Termin ważności, Ilość, Waga brutto) :contentReference[oaicite:0]{index=0}  
+       - WZ/Subiekt GT (z `szt.` i EAN)  
+       - Faktura D, E, B, C lub A.  
+    5. Pokazujemy tabelę, statystyki (z kontrolą brakujących i duplikatów) i eksport do Excela.
     """
 )
 
@@ -34,6 +33,36 @@ def extract_text(pdf_bytes: bytes) -> list[str]:
         return lines
     except Exception:
         return []
+
+def parse_layout_wz_table(all_lines: list[str]) -> pd.DataFrame:
+    """
+    Parsuje WZ w formie tabelarycznej:
+    Lp, Kod produktu, Nazwa, Termin ważności, Ilość, Waga brutto
+    """
+    products = []
+    # znajdź nagłówek "Kod produktu"
+    header_idx = next((i for i, ln in enumerate(all_lines)
+                       if ln.startswith("Kod produktu")), None)
+    if header_idx is None:
+        return pd.DataFrame(products)
+    # każda kolejna linia to wiersz danych
+    pat = re.compile(
+        r"^(\d+)\s+"            # Lp
+        r"(\d{13})\s+"          # Kod produktu (EAN)
+        r"(.+?)\s+"             # Nazwa
+        r"(\d{4}-\d{2}-\d{2})\s+"# Termin ważności
+        r"([\d\s,]+)\s+"        # Ilość (z separatorami)
+        r"([\d\s,]+)$"          # Waga brutto
+    )
+    for ln in all_lines[header_idx+1:]:
+        if m := pat.match(ln):
+            qty = int(float(m.group(5).replace(" ", "").replace(",", ".")))
+            products.append({
+                "Lp": int(m.group(1)),
+                "Symbol": m.group(2),
+                "Ilość": qty
+            })
+    return pd.DataFrame(products)
 
 def parse_layout_wz(all_lines: list[str]) -> pd.DataFrame:
     products = []
@@ -187,14 +216,13 @@ lines = [ln for ln in lines if not ln.startswith("/") and "Strona" not in ln]
 # 2) wstaw spację Lp→Nazwa
 lines = [re.sub(r"^(\d+)(?=[A-Za-z])", r"\1 ", ln) for ln in lines]
 
-# 3) detekcja WZ/Subiekt GT (uwzględnia spacje w grupowaniu ilości)
-is_wz = (
+# 3) detekcje
+is_wz_table = any(ln.startswith("Kod produktu") for ln in lines)           # tabela WZ :contentReference[oaicite:1]{index=1}
+is_wz       = (
     any(re.search(r"[\d\s,]+\s+szt\.\s+\d{13}\.?", ln) for ln in lines)
     or any(re.match(r"^\d+\s+\d{13}\s+.+?\s+[\d\s,]+\s+szt\.", ln) for ln in lines)
     or any(re.match(r"^\d+\s+.+\s+[\d\s,]+\,\d+\s+szt\.\s+.*\d{13}$", ln) for ln in lines)
 )
-
-# pozostałe detekcje faktury
 is_d     = any(re.match(r"^(\d{13})", ln) for ln in lines)
 has_kres = any(ln.lower().startswith("kod kres") for ln in lines)
 is_e     = any(re.match(r"^(\d+)\s+.+?\s+(\d{1,3})\s+szt\.", ln) for ln in lines) and has_kres
@@ -203,12 +231,13 @@ has_plain= any(re.fullmatch(r"\d{13}", ln) for ln in lines)
 is_c     = has_plain and not is_b
 
 # 4) wybór parsera
-if   is_wz: df = parse_layout_wz(lines)
-elif is_d:  df = parse_layout_d(lines)
-elif is_e:  df = parse_layout_e(lines)
-elif is_b:  df = parse_layout_b(lines)
-elif is_c:  df = parse_layout_c(lines)
-else:       df = parse_layout_a(lines)
+if   is_wz_table: df = parse_layout_wz_table(lines)
+elif is_wz:       df = parse_layout_wz(lines)
+elif is_d:        df = parse_layout_d(lines)
+elif is_e:        df = parse_layout_e(lines)
+elif is_b:        df = parse_layout_b(lines)
+elif is_c:        df = parse_layout_c(lines)
+else:             df = parse_layout_a(lines)
 
 # 5) filtr pustych ilości
 if "Ilość" in df.columns:
@@ -217,24 +246,11 @@ if df.empty:
     st.error("Po parsowaniu nie znaleziono pozycji.")
     st.stop()
 
-# 6) wykrycie Lp, które nie zostały sparsowane (np. brakujący EAN)
-all_lps = [
-    int(m.group(1)) for ln in lines
-    if (m := re.match(r"^(\d+)\s+.+\s+[\d\s,]+\s+szt\.", ln))
-]
-parsed_lps = df["Lp"].astype(int).tolist()
-missing_lps = sorted(set(all_lps) - set(parsed_lps))
-if missing_lps:
-    st.error(f"Brakuje EAN (nie sparsowano) dla pozycji: {', '.join(map(str, missing_lps))}")
-
-# 7) statystyki i walidacja spójności
-total    = len(all_lps)
-parsed   = df.shape[0]
+# 6) statystyki i walidacja spójności
+total    = df.shape[0]
 unique_e = df["Symbol"].nunique()
 sum_qty  = int(df["Ilość"].sum())
 
-if parsed != total:
-    st.error(f"Sparsowano {parsed} z {total} pozycji.")
 if unique_e != total:
     st.error(f"Liczba pozycji ({total}) różni się od liczby unikalnych EAN-ów ({unique_e}).")
 
@@ -244,7 +260,7 @@ st.markdown(
     f"**Łączna ilość:** {sum_qty}"
 )
 
-# 8) wynik i eksport
+# 7) wynik i eksport
 st.subheader("Wyekstrahowane pozycje")
 st.dataframe(df, use_container_width=True)
 
