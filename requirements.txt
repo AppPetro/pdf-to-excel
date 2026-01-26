@@ -3,4 +3,4 @@ pandas
 openpyxl
 streamlit
 pdfplumber
-altair<5
+altair==4.2.2
